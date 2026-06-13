@@ -14,6 +14,7 @@ router.post('/auth', async (req, res) => {
   try {
     const tg  = req.telegramUser;
     const ref = req.body.ref ? Number(req.body.ref) : null;
+    const hadLocalSave = req.body.hadLocalSave === true;
 
     let isNew = false;
     let user  = await User.findOne({ telegramId: tg.id });
@@ -32,12 +33,14 @@ router.post('/auth', async (req, res) => {
       if (ref)
         await User.updateOne({ telegramId: ref }, { $inc: { referralCount: 1 } });
     } else {
-      // Считаем оффлайн доход
+      // Серверный оффлайн-доход считаем ТОЛЬКО когда у клиента не было
+      // локального сохранения (новое устройство / очищенный кэш).
+      // Иначе клиент уже начислил его точно по savedAt — без ping.
       const now        = Date.now();
       const lastOnline = new Date(user.lastOnline).getTime();
       const offlineSecs = Math.max(0, (now - lastOnline) / 1000);
 
-      if (offlineSecs > 60) {
+      if (!hadLocalSave && offlineSecs > 1) {
         const earned = calcOfflineIncome(
           user.unlockedLocations,
           offlineSecs,
@@ -64,18 +67,11 @@ router.post('/auth', async (req, res) => {
 
 /* ─────────────────────────────────────
    POST /api/ping
-   Обновляем lastOnline пока юзер в игре (раз в 30 сек)
+   (устарело) lastOnline теперь обновляется через /api/save.
+   Оставлено для обратной совместимости со старым фронтом.
 ───────────────────────────────────── */
 router.post('/ping', async (req, res) => {
-  try {
-    await User.updateOne(
-      { telegramId: req.telegramUser.id },
-      { $set: { lastOnline: new Date() } }
-    );
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
+  res.json({ ok: true });
 });
 
 /* ─────────────────────────────────────
@@ -145,6 +141,9 @@ router.post('/save', async (req, res) => {
       user.markModified('locIncome');
     }
 
+    // lastOnline двигаем вперёд при каждом сохранении —
+    // это «момент, до которого доход уже учтён». Заменяет ping.
+    user.lastOnline = new Date();
     user.updatedAt = Date.now();
     await user.save();
 

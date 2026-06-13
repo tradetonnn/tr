@@ -44,9 +44,6 @@ const UserSchema = new mongoose.Schema({
   // Коллектор — монеты накопленные в коллекторе (не в верхнем балансе)
   collectorPending:   { type: Number, default: 0 },
 
-  // Прогресс локаций: { city: {ratePerMeter, startDist, endDist, totalTon, expired}, ... }
-  locIncome:          { type: mongoose.Schema.Types.Mixed, default: {} },
-
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 }, { versionKey: false });
