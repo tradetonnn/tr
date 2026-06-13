@@ -5,7 +5,7 @@
   --red:#ef4444; --cyan:#06b6d4;
   --t1:#f0eeff; --t2:rgba(240,238,255,.55); --t3:rgba(240,238,255,.28);
   --rm:14px; --rl:18px; --rmax:999px;
-  --font:'Inter',system-ui,sans-serif; --top-h:130px; --nav-h:100px;
+  --font:'Inter',system-ui,sans-serif; --top-h:123px; --nav-h:100px;
   --tg-offset:0px;
 }
 *,*::before,*::after { margin:0; padding:0; box-sizing:border-box; }
