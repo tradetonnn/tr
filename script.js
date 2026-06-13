@@ -1335,7 +1335,7 @@ function checkCollisions(){
   for (const c of coinList)
     if (c.active && Math.abs(c.x-Game.playerX) < cR) collectCoin(c);
 }
-// Монетки — чистый визуал. Доход начисляется по времени в accrueIncome().
+// Монетки — источник онлайн-дохода. Оффлайн считается по той же ставке.
 function collectCoin(c){
   c.active=false;
 
@@ -1361,8 +1361,6 @@ function collectCoin(c){
 }
 
 function collectPending(){
-  // Сначала доначисляем доход за время до момента сбора
-  accrueIncome();
   if (Game.pendingCoins <= 0){ updateCollector(); return; }
   const amount = Game.pendingCoins;
 
@@ -1600,9 +1598,8 @@ function saveToServer(){
   apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
 }
 
-// Idle-тик: начисляем доход и в фоне (когда rAF спит).
-// accrueIncome идемпотентен по времени — двойного начисления нет.
-setInterval(() => { accrueIncome(); updateCollector(); }, 1000);
+// Онлайн-доход идёт через монетки (collectCoin).
+// accrueIncome вызывается только при загрузке/уходе в фон (оффлайн).
 
 // Автосохранение: локально каждые 5 сек, на сервер каждые 30 сек
 setInterval(saveLocal, 5000);
@@ -1652,9 +1649,7 @@ function loop(){
   Game.playerX += Game.speed;
   Game.groundOffset += Game.speed;
 
-  // Доход капает по времени (totalDist растёт внутри accrueIncome)
-  accrueIncome();
-
+  // totalDist растёт от монеток (collectCoin обновляет lastTick)
   // Обновлять коллектор раз в 10 кадров
   if (++_collFrame >= 10){ _collFrame = 0; updateCollector(); }
   if (++Game.frameTick >= Game.frameDelay){ Game.frameTick=0; Game.frame=(Game.frame+1)%SPRITE_FRAMES; }
@@ -1760,9 +1755,6 @@ function buildLocCards(){
 function selectLocation(id){
   const loc = LOCATIONS[id];
   if (!loc) return;
-  // Доначисляем доход по старой локации перед сменой ставки
-  accrueIncome();
-
   if (!Game.unlocked.has(id)){
     if (Game.coins < loc.price){ showToast('Не хватает монет 💰'); return; }
     Game.coins -= loc.price;
