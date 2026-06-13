@@ -1340,7 +1340,8 @@ function collectCoin(c){
 function collectPending(){
   if (Game.pendingCoins <= 0) return;
   const amount      = Game.pendingCoins;
-  const sessionDist = Game.sessionDist;
+  const sessionDist = Game.sessionDist;  // ← сохраняем перед сбросом
+  
   Game.coins          += amount;
   Game.totalCollected += amount;
   Game.pendingCoins    = 0;
@@ -1349,9 +1350,11 @@ function collectPending(){
   updateUI();
   updateCollector();
   showToast('Монеты собраны! 💰');
-  saveLocal();
-  if (getInitData())
+  
+  // Сохраняем на сервер асинхронно
+  if (getInitData()){
     apiRequest('POST', '/api/collect', { amount, sessionDist }).catch(console.warn);
+  }
 }
 
 function updateCollector(){
@@ -1555,6 +1558,7 @@ function buildSavePayload(){
     coins:             Game.coins,
     totalCollected:    Game.totalCollected,
     totalDist:         Game.totalDist,
+    sessionDist:       Game.sessionDist,  // ← ДОБАВИТЬ
     sessionLimit:      isFinite(Game.sessionLimit) ? Game.sessionLimit : 999999999,
     sessionRuns:       Game.sessionRuns,
     unlockedLocations: Array.from(Game.unlocked),
@@ -1905,29 +1909,24 @@ async function syncFromServer(){
     const data = await apiRequest('GET', '/api/user');
     if (!data.ok) return;
     const u = data.user;
-
-    // Берём максимум между сервером и локальным хранилищем
-    // (защита от потери прогресса если сервер отстал)
-    Game.coins          = Math.max(Game.coins, u.coins);
-    Game.totalCollected = Math.max(Game.totalCollected, u.totalCollected);
-    Game.totalDist      = Math.max(Game.totalDist, u.totalDist);
-    Game.sessionLimit   = u.sessionLimit >= 999999999 ? Infinity : Math.max(Game.sessionLimit, u.sessionLimit);
-    Game.sessionRuns    = Math.max(Game.sessionRuns, u.sessionRuns);
-
-    // Локации — объединяем
-    for (const loc of u.unlockedLocations) Game.unlocked.add(loc);
-
-    Game.currentLoc  = u.currentLoc  || Game.currentLoc;
-    Game.activeSkin  = u.activeSkin  || Game.activeSkin;
-    Game.skinBonus   = Math.max(Game.skinBonus, u.skinBonus);
-    Game.tonWallet   = u.tonWallet   || null;
-    if (Game.activeSkin) loadSprite(Game.activeSkin);
-
+    Game.coins          = u.coins;
+    Game.totalCollected = u.totalCollected;
+    Game.totalDist      = u.totalDist;
+    Game.sessionDist    = u.sessionDist || 0;  // ← ДОБАВИТЬ
+    Game.sessionLimit   = u.sessionLimit >= 999999999 ? Infinity : u.sessionLimit;
+    Game.sessionRuns    = u.sessionRuns;
+    Game.unlocked       = new Set(u.unlockedLocations);
+    Game.currentLoc     = u.currentLoc;
+    Game.activeSkin     = u.activeSkin;
+    Game.skinBonus      = u.skinBonus;
+    Game.tonWallet      = u.tonWallet || null;
+    if (u.activeSkin) loadSprite(u.activeSkin);
     updateUI(); buildLocCards(); updateCollector();
-    saveLocal(); // сохраняем объединённый стейт локально
 
+    // Показываем оффлайн доход если есть
     if (u.offlinePending > 0) showOfflineModal(u.offlinePending);
 
+    // Загружаем кассу
     const cb = await apiRequest('GET', '/api/cashbox');
     if (cb.ok) { cashboxAmount = cb.cashbox; updateCashbox(); }
   } catch(e){ console.warn('syncFromServer failed:', e); }
@@ -2009,6 +2008,7 @@ function start(){
   buildLocCards();
   updateUI();
   setTab('game');
+  if (typeof Game.sessionRuns === 'undefined') Game.sessionRuns = 0;
   loop();
 }
 
