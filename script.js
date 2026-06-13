@@ -1701,7 +1701,7 @@ function showToast(msg){
 ═══════════════════════════════════════ */
 
 /* ── API — связь с сервером ── */
-const API_URL = 'https://runton-production.up.railway.app'; // ← замени на свой Railway URL
+const API_URL = 'https://your-app.railway.app'; // ← замени на свой Railway URL
 
 function getInitData(){
   return window.Telegram?.WebApp?.initData || '';
@@ -1758,6 +1758,33 @@ window.addEventListener('load', async () => {
     if (tg.requestFullscreen) tg.requestFullscreen();
     // Отключаем свайп вниз чтобы не закрывал приложение
     if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+
+    // Выставляем CSS-переменную с высотой шапки Telegram
+    function applyTgOffset(){
+      // Пробуем несколько источников
+      let offset = 0;
+
+      // 1. Новый API (Telegram 7.10+)
+      if (tg.safeAreaInset?.top > 0) {
+        offset = tg.safeAreaInset.top;
+      }
+      // 2. CSS переменная которую Telegram выставляет сам
+      else {
+        const fromCss = parseInt(getComputedStyle(document.documentElement)
+          .getPropertyValue('--tg-safe-area-inset-top')) || 0;
+        if (fromCss > 0) offset = fromCss;
+      }
+      // 3. Фоллбек — высота шапки Telegram ~55px если ничего не сработало
+      if (offset === 0 && window.Telegram?.WebApp) offset = 55;
+
+      document.documentElement.style.setProperty('--tg-offset', offset + 'px');
+    }
+
+    // Запускаем сразу и с задержкой (Telegram выставляет переменные не мгновенно)
+    applyTgOffset();
+    setTimeout(applyTgOffset, 100);
+    setTimeout(applyTgOffset, 500);
+    tg.onEvent('viewportChanged', applyTgOffset);
   }
   // Авторизация + загрузка данных с сервера
   if (getInitData()){
