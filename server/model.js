@@ -13,36 +13,42 @@ const UserSchema = new mongoose.Schema({
   firstName:   { type: String, default: '' },
   lastName:    { type: String, default: '' },
 
-  // Игровые данные
-  coins:              { type: Number, default: 0 },
-  totalCollected:     { type: Number, default: 0 },
-  totalDist:          { type: Number, default: 0 },
-  sessionDist:        { type: Number, default: 0 },  // ← ДОБАВЛЕНО
-  sessionLimit:       { type: Number, default: 27648 },
-  sessionRuns:        { type: Number, default: 0 },
+  // ── Баланс и прогресс ──
+  coins:              { type: Number, default: 0 },   // верхний баланс (собранное)
+  totalCollected:     { type: Number, default: 0 },   // всего собрано за всё время
+  totalDist:          { type: Number, default: 0 },   // всего "пройдено" метров (= время * 1.92)
+
+  // ── Коллектор (idle-накопление) ──
+  collectorPending:   { type: Number, default: 0 },   // доход, ждущий сбора
+  lastTick:           { type: Date,   default: Date.now }, // момент, до которого доход уже начислен
+
+  // ── Лимит накопления (в секундах) ──
+  // Базово 4 часа = 14400 сек. Коллектор не копит больше этого запаса.
+  capSeconds:         { type: Number, default: 14400 },
+
+  // ── Локации ──
   unlockedLocations:  { type: [String], default: ['city'] },
   currentLoc:         { type: String, default: 'city' },
+
+  // Прогресс/срок локаций по времени:
+  // { city: { totalTon, startTime, endTime, expired }, ... }
+  locIncome:          { type: mongoose.Schema.Types.Mixed, default: {} },
+
+  // ── Скины ──
   activeSkin:         { type: String, default: null },
   skinBonus:          { type: Number, default: 0 },
 
-  // TON кошелёк
+  // ── TON кошелёк ──
   tonWallet:          { type: String, default: null },
 
-  // Реферальная система
+  // ── Реферальная система ──
   referredBy:         { type: Number, default: null },
   referralCount:      { type: Number, default: 0 },
   referralEarned:     { type: Number, default: 0 },
 
-  // История выводов
+  // ── История выводов ──
   withdrawals:        { type: [WithdrawSchema], default: [] },
   totalWithdrawn:     { type: Number, default: 0 },
-
-  // Оффлайн доход
-  lastOnline:         { type: Date, default: Date.now },
-  offlinePending:     { type: Number, default: 0 },
-
-  // Коллектор — монеты накопленные в коллекторе (не в верхнем балансе)
-  collectorPending:   { type: Number, default: 0 },
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },

@@ -1,18 +1,25 @@
 /**
- * income.js — расчёт оффлайн дохода
+ * income.js — ЕДИНАЯ idle-логика дохода (общая для сервера и клиента).
  *
- * Доход считается по тем же правилам что и в игре:
- * - Каждая локация даёт ratePerSecond TON/сек
- * - Город всегда активен
- * - Остальные локации действуют SECONDS_36 секунд с момента открытия
- * - Максимум оффлайн накопления = sessionLimit / METERS_36 * totalTon локации
+ * Модель:
+ *  - Время = деньги. Игрок "проходит" METERS_PER_SEC метров каждую секунду,
+ *    онлайн он или нет.
+ *  - Каждая локация за полный срок (SECONDS_36) даёт totalTon TON.
+ *    Значит ставка локации = totalTon / SECONDS_36 TON/сек.
+ *  - Доход капает ТОЛЬКО от активной локации (currentLoc).
+ *  - Коллектор копит максимум capSeconds секунд дохода (бак). База — 4 часа.
+ *  - Скин даёт +5% пока активен (skinBonus — timestamp окончания в мс).
+ *
+ * Один источник истины — lastTick (момент, до которого доход начислен).
+ * Любой расчёт: earned = rate * min(now - lastTick, capSeconds).
+ * Это работает идентично онлайн / оффлайн / при перезагрузке.
  */
 
-const SECONDS_36    = 36 * 24 * 3600;       // 3 110 400 сек
-const METERS_36     = 5971968;               // метров за 36 дней
-const METERS_PER_SEC = 1.92;                 // м/сек при непрерывной игре
-const MAX_OFFLINE_HOURS = 8;                 // максимум накопления оффлайн — 8 часов
+const SECONDS_36     = 36 * 24 * 3600;   // 3 110 400 сек — полный срок локации
+const METERS_36      = 5971968;          // метров за полный срок
+const METERS_PER_SEC = 1.92;             // скорость "прохождения"
 
+// Диапазоны дохода локаций (TON за полный срок). Должны совпадать с фронтом.
 const LOCATION_INCOME = {
   city:      { min: 1,   max: 1   },
   forest:    { min: 6,   max: 6.5 },
@@ -23,38 +30,61 @@ const LOCATION_INCOME = {
 };
 
 /**
- * Считает оффлайн доход за период offlineSecs секунд
- * для набора разблокированных локаций.
- *
- * @param {string[]} unlockedLocations
- * @param {number}   offlineSecs  — сколько секунд юзер был оффлайн
- * @param {number}   sessionLimit — лимит метров пользователя
- * @returns {number} TON заработано оффлайн
+ * Ставка дохода активной локации в TON/сек.
+ * Берёт реальный totalTon из locIncome (зафиксирован при открытии),
+ * иначе — средний по диапазону.
  */
-function calcOfflineIncome(unlockedLocations, offlineSecs, sessionLimit) {
-  // Ограничиваем максимальное время накопления
-  const maxSecs  = MAX_OFFLINE_HOURS * 3600;
-  const elapsed  = Math.min(offlineSecs, maxSecs);
-
-  let totalTon = 0;
-
-  for (const locId of unlockedLocations) {
-    const loc = LOCATION_INCOME[locId];
-    if (!loc) continue;
-
-    // Среднее значение дохода для локации
-    const avgTon    = (loc.min + loc.max) / 2;
-    const ratePerSec = avgTon / SECONDS_36;   // TON/сек
-
-    totalTon += ratePerSec * elapsed;
+function ratePerSecond(locId, locIncome) {
+  const rec = locIncome && locIncome[locId];
+  let totalTon;
+  if (rec && typeof rec.totalTon === 'number') {
+    totalTon = rec.totalTon;
+  } else {
+    const def = LOCATION_INCOME[locId];
+    if (!def) return 0;
+    totalTon = (def.min + def.max) / 2;
   }
-
-  // Применяем ограничение по sessionLimit
-  // sessionLimit в метрах → переводим в секунды
-  const limitSecs = (sessionLimit / METERS_PER_SEC);
-  const maxByLimit = totalTon * Math.min(1, limitSecs / SECONDS_36 * 24);
-
-  return Math.min(totalTon, maxByLimit);
+  return totalTon / SECONDS_36;
 }
 
-module.exports = { calcOfflineIncome };
+/**
+ * Главная функция: сколько дохода накоплено за период.
+ *
+ * @param {Object} opts
+ * @param {string}  opts.currentLoc   — активная локация
+ * @param {Object}  opts.locIncome    — прогресс локаций {id:{totalTon,startTime,endTime,expired}}
+ * @param {number}  opts.elapsedSec   — сколько секунд прошло с lastTick
+ * @param {number}  opts.capSeconds   — максимум секунд накопления (бак)
+ * @param {number}  [opts.skinBonusUntil=0] — timestamp(мс) окончания скина
+ * @param {number}  [opts.nowMs=Date.now()] — текущее время в мс
+ * @returns {number} TON заработано
+ */
+function calcIncome({ currentLoc, locIncome, elapsedSec, capSeconds, skinBonusUntil = 0, nowMs = Date.now() }) {
+  if (!(elapsedSec > 0)) return 0;
+
+  // Обрезаем по баку
+  const effective = Math.min(elapsedSec, capSeconds);
+  if (effective <= 0) return 0;
+
+  // Локация истекла? — дохода нет (город не истекает)
+  const rec = locIncome && locIncome[currentLoc];
+  if (rec && rec.expired) return 0;
+
+  let earned = ratePerSecond(currentLoc, locIncome) * effective;
+
+  // Бонус скина +5% (по среднему: если скин активен сейчас)
+  if (skinBonusUntil && skinBonusUntil > nowMs) {
+    earned *= 1.05;
+  }
+
+  return earned;
+}
+
+module.exports = {
+  SECONDS_36,
+  METERS_36,
+  METERS_PER_SEC,
+  LOCATION_INCOME,
+  ratePerSecond,
+  calcIncome,
+};

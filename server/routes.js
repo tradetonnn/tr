@@ -2,59 +2,119 @@ const express = require('express');
 const router  = express.Router();
 const User    = require('./model');
 const { authMiddleware } = require('./auth');
-const { calcOfflineIncome } = require('./income');
+const { calcIncome, SECONDS_36, METERS_PER_SEC, LOCATION_INCOME } = require('./income');
 
 router.use(authMiddleware);
 
+/* ═══════════════════════════════════════════════════
+   ОБЩАЯ idle-ЛОГИКА: начисление дохода по времени.
+   Вызывается при любом обращении к серверу.
+   Меняет user в памяти (coins НЕ трогает — только collectorPending).
+═══════════════════════════════════════════════════ */
+function accrue(user) {
+  const now      = Date.now();
+  const lastTick = new Date(user.lastTick || user.createdAt || now).getTime();
+  const elapsed  = Math.max(0, (now - lastTick) / 1000);
+
+  if (elapsed <= 0) { user.lastTick = new Date(now); return 0; }
+
+  // Истечение локаций по времени
+  ensureLocExpiry(user, now);
+
+  const earned = calcIncome({
+    currentLoc:     user.currentLoc,
+    locIncome:      user.locIncome || {},
+    elapsedSec:     elapsed,
+    capSeconds:     user.capSeconds || 14400,
+    skinBonusUntil: user.skinBonus || 0,
+    nowMs:          now,
+  });
+
+  if (earned > 0) {
+    user.collectorPending = (user.collectorPending || 0) + earned;
+    // totalDist растёт по времени (обрезанному баком) — для статистики
+    const effective = Math.min(elapsed, user.capSeconds || 14400);
+    user.totalDist = (user.totalDist || 0) + effective * METERS_PER_SEC;
+  }
+
+  user.lastTick = new Date(now);
+  return earned;
+}
+
+/* Проверка/применение истечения локаций по времени.
+   Город не истекает (переоткрывается). Остальные удаляются из unlocked. */
+function ensureLocExpiry(user, nowMs) {
+  const li = user.locIncome || {};
+  let changed = false;
+  for (const id of Array.from(user.unlockedLocations || [])) {
+    const rec = li[id];
+    if (!rec || rec.expired) continue;
+    if (rec.endTime && nowMs >= rec.endTime) {
+      if (id === 'city') {
+        // переоткрываем город
+        li.city = makeLocRecord('city', nowMs);
+      } else {
+        rec.expired = true;
+        user.unlockedLocations = user.unlockedLocations.filter(x => x !== id);
+        if (user.currentLoc === id) user.currentLoc = 'city';
+      }
+      changed = true;
+    }
+  }
+  if (changed) {
+    user.locIncome = li;
+    user.markModified('locIncome');
+    user.markModified('unlockedLocations');
+  }
+}
+
+/* Создать запись локации: фиксируем totalTon и срок по времени. */
+function makeLocRecord(id, nowMs) {
+  const def = LOCATION_INCOME[id] || { min: 1, max: 1 };
+  const totalTon = def.min + Math.random() * (def.max - def.min);
+  return {
+    totalTon,
+    startTime: nowMs,
+    endTime:   nowMs + SECONDS_36 * 1000,
+    expired:   false,
+  };
+}
+
 /* ─────────────────────────────────────
-   POST /api/auth
-   Создать/обновить юзера + считаем оффлайн доход
+   POST /api/auth — создать/обновить юзера + начислить idle-доход
 ───────────────────────────────────── */
 router.post('/auth', async (req, res) => {
   try {
     const tg  = req.telegramUser;
     const ref = req.body.ref ? Number(req.body.ref) : null;
-    const hadLocalSave = req.body.hadLocalSave === true;
 
     let isNew = false;
     let user  = await User.findOne({ telegramId: tg.id });
 
     if (!user) {
       isNew = true;
-      user  = new User({
+      const now = Date.now();
+      user = new User({
         telegramId: tg.id,
         username:   tg.username   || '',
         firstName:  tg.first_name || '',
         lastName:   tg.last_name  || '',
         referredBy: ref,
-        lastOnline: new Date(),
+        lastTick:   new Date(now),
+        currentLoc: 'city',
+        unlockedLocations: ['city'],
+        locIncome:  { city: makeLocRecord('city', now) },
       });
+      user.markModified('locIncome');
       await user.save();
       if (ref)
         await User.updateOne({ telegramId: ref }, { $inc: { referralCount: 1 } });
     } else {
-      // Серверный оффлайн-доход считаем ТОЛЬКО когда у клиента не было
-      // локального сохранения (новое устройство / очищенный кэш).
-      // Иначе клиент уже начислил его точно по savedAt — без ping.
-      const now        = Date.now();
-      const lastOnline = new Date(user.lastOnline).getTime();
-      const offlineSecs = Math.max(0, (now - lastOnline) / 1000);
-
-      if (!hadLocalSave && offlineSecs > 1) {
-        const earned = calcOfflineIncome(
-          user.unlockedLocations,
-          offlineSecs,
-          user.sessionLimit
-        );
-        if (earned > 0) {
-          user.offlinePending = (user.offlinePending || 0) + earned;
-        }
-      }
-
+      // Начисляем доход за время отсутствия (точно по lastTick)
+      accrue(user);
       user.username  = tg.username   || '';
       user.firstName = tg.first_name || '';
       user.lastName  = tg.last_name  || '';
-      user.lastOnline = new Date();
       await user.save();
     }
 
@@ -66,44 +126,21 @@ router.post('/auth', async (req, res) => {
 });
 
 /* ─────────────────────────────────────
-   POST /api/ping
-   (устарело) lastOnline теперь обновляется через /api/save.
-   Оставлено для обратной совместимости со старым фронтом.
+   POST /api/ping — устарело (no-op, совместимость)
 ───────────────────────────────────── */
 router.post('/ping', async (req, res) => {
   res.json({ ok: true });
 });
 
 /* ─────────────────────────────────────
-   POST /api/offline/collect
-   Перенести оффлайн-накопленное в коллектор (НЕ в верхний баланс)
-───────────────────────────────────── */
-router.post('/offline/collect', async (req, res) => {
-  try {
-    const user = await User.findOne({ telegramId: req.telegramUser.id });
-    if (!user) return res.status(404).json({ error: 'Not found' });
-
-    const amount = user.offlinePending || 0;
-    if (amount <= 0) return res.json({ ok: true, earned: 0, collectorPending: user.collectorPending || 0 });
-
-    user.collectorPending = (user.collectorPending || 0) + amount;
-    user.offlinePending   = 0;
-    await user.save();
-
-    res.json({ ok: true, earned: amount, collectorPending: user.collectorPending });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-/* ─────────────────────────────────────
-   GET /api/user
-   Загрузить прогресс игрока
+   GET /api/user — загрузить прогресс (с доначислением)
 ───────────────────────────────────── */
 router.get('/user', async (req, res) => {
   try {
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
+    accrue(user);
+    await user.save();
     res.json({ ok: true, user: formatUser(user) });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -111,74 +148,59 @@ router.get('/user', async (req, res) => {
 });
 
 /* ─────────────────────────────────────
-   POST /api/save
-   Сохранить весь прогресс одним запросом
+   POST /api/save — сохранить состояние от клиента.
+   Доход НЕ принимаем от клиента вслепую: пересчитываем сами по lastTick.
+   От клиента берём только "настройки" (currentLoc, скин и т.п.).
 ───────────────────────────────────── */
 router.post('/save', async (req, res) => {
   try {
-    const { coins, totalCollected, totalDist, sessionDist,
-            sessionLimit, sessionRuns, unlockedLocations, currentLoc,
-            activeSkin, skinBonus, collectorPending, locIncome } = req.body;
+    const { currentLoc, activeSkin, skinBonus, unlockedLocations, capSeconds } = req.body;
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
 
-    if (typeof coins === 'number')           user.coins          = coins;
-    if (typeof totalCollected === 'number')  user.totalCollected = totalCollected;
-    if (typeof totalDist === 'number')        user.totalDist      = totalDist;
-    if (typeof sessionDist === 'number')      user.sessionDist    = sessionDist;
-    if (typeof sessionLimit === 'number')     user.sessionLimit   = sessionLimit;
-    if (typeof sessionRuns === 'number')      user.sessionRuns    = sessionRuns;
-    if (Array.isArray(unlockedLocations))     user.unlockedLocations = unlockedLocations;
-    if (typeof currentLoc === 'string')       user.currentLoc     = currentLoc;
-    if (activeSkin !== undefined)             user.activeSkin     = activeSkin;
-    if (typeof skinBonus === 'number')        user.skinBonus      = skinBonus;
-    if (typeof collectorPending === 'number') user.collectorPending = collectorPending;
+    // Сначала доначисляем по старому currentLoc, потом меняем локацию
+    accrue(user);
 
-    // locIncome — Mixed-поле, требует markModified
-    if (locIncome && typeof locIncome === 'object') {
-      user.locIncome = locIncome;
-      user.markModified('locIncome');
+    if (typeof currentLoc === 'string' && (user.unlockedLocations || []).includes(currentLoc)) {
+      user.currentLoc = currentLoc;
     }
+    if (activeSkin !== undefined)          user.activeSkin = activeSkin;
+    if (typeof skinBonus === 'number')     user.skinBonus  = skinBonus;
+    if (typeof capSeconds === 'number')    user.capSeconds = capSeconds;
+    if (Array.isArray(unlockedLocations))  user.unlockedLocations = unlockedLocations;
 
-    // lastOnline двигаем вперёд при каждом сохранении —
-    // это «момент, до которого доход уже учтён». Заменяет ping.
-    user.lastOnline = new Date();
-    user.updatedAt = Date.now();
     await user.save();
-
-    res.json({ ok: true });
+    res.json({ ok: true, user: formatUser(user) });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 /* ─────────────────────────────────────
-   POST /api/collect
-   Собрать монеты
+   POST /api/collect — собрать монеты из коллектора в баланс
 ───────────────────────────────────── */
 router.post('/collect', async (req, res) => {
   try {
-    const { amount, sessionDist } = req.body;
-    if (typeof amount !== 'number' || amount < 0)
-      return res.status(400).json({ error: 'Invalid amount' });
-
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
 
-    // Обновляем все поля
-    user.coins          += amount;
-    user.totalCollected += amount;
-    user.totalDist      += sessionDist || 0;
-    user.sessionDist     = 0;
-    user.sessionRuns    += 1;
+    // Доначисляем актуальный доход перед сбором
+    accrue(user);
+
+    const amount = user.collectorPending || 0;
+    if (amount <= 0) {
+      await user.save();
+      return res.json({ ok: true, collected: 0, coins: user.coins, collectorPending: 0 });
+    }
+
+    user.coins           += amount;
+    user.totalCollected  += amount;
     user.collectorPending = 0;
-    user.updatedAt       = Date.now();
-    
     await user.save();
 
     // +5% рефереру
-    if (user.referredBy && amount > 0) {
+    if (user.referredBy) {
       const bonus = amount * 0.05;
       await User.updateOne(
         { telegramId: user.referredBy },
@@ -186,7 +208,7 @@ router.post('/collect', async (req, res) => {
       );
     }
 
-    res.json({ ok: true, coins: user.coins });
+    res.json({ ok: true, collected: amount, coins: user.coins, collectorPending: 0 });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -204,16 +226,27 @@ router.post('/buy/location', async (req, res) => {
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
-    if (user.unlockedLocations.includes(locationId))
+
+    accrue(user);
+
+    if ((user.unlockedLocations || []).includes(locationId))
       return res.status(400).json({ error: 'Already unlocked' });
     if (user.coins < price)
       return res.status(400).json({ error: 'Not enough coins' });
 
+    const now = Date.now();
     user.coins -= price;
     user.unlockedLocations.push(locationId);
+    const li = user.locIncome || {};
+    li[locationId] = makeLocRecord(locationId, now);
+    user.locIncome = li;
+    user.markModified('locIncome');
+    user.markModified('unlockedLocations');
+    // Переключаемся на купленную локацию
+    user.currentLoc = locationId;
     await user.save();
 
-    res.json({ ok: true, coins: user.coins, unlockedLocations: user.unlockedLocations });
+    res.json({ ok: true, user: formatUser(user) });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -232,6 +265,9 @@ router.post('/buy/skin', async (req, res) => {
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
+
+    accrue(user);
+
     if (user.coins < skin.price)
       return res.status(400).json({ error: 'Not enough coins' });
 
@@ -242,36 +278,40 @@ router.post('/buy/skin', async (req, res) => {
     user.skinBonus  = base + ms;
     await user.save();
 
-    res.json({ ok: true, coins: user.coins, activeSkin: user.activeSkin, skinBonus: user.skinBonus });
+    res.json({ ok: true, user: formatUser(user) });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 /* ─────────────────────────────────────
-   POST /api/buy/limit
+   POST /api/buy/limit — увеличить бак (capSeconds), в часах
 ───────────────────────────────────── */
 router.post('/buy/limit', async (req, res) => {
   try {
+    // add — в секундах (1ч=3600). unlimited — очень большой бак.
     const UPGRADES = [
-      { add:6912,    price:1  },
-      { add:34560,   price:5  },
-      { add:69120,   price:10 },
-      { add:999999999, price:30, unlimited:true },
+      { addSec: 3600,        price: 1  },   // +1 час
+      { addSec: 5 * 3600,    price: 5  },   // +5 часов
+      { addSec: 10 * 3600,   price: 10 },   // +10 часов
+      { addSec: 9999 * 3600, price: 30, unlimited: true },
     ];
     const upg = UPGRADES[req.body.upgradeIndex];
     if (!upg) return res.status(400).json({ error: 'Invalid upgrade' });
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
+
+    accrue(user);
+
     if (user.coins < upg.price)
       return res.status(400).json({ error: 'Not enough coins' });
 
     user.coins -= upg.price;
-    user.sessionLimit = upg.unlimited ? 999999999 : user.sessionLimit + upg.add;
+    user.capSeconds = upg.unlimited ? (9999 * 3600) : (user.capSeconds || 14400) + upg.addSec;
     await user.save();
 
-    res.json({ ok: true, coins: user.coins, sessionLimit: user.sessionLimit });
+    res.json({ ok: true, user: formatUser(user) });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -279,7 +319,6 @@ router.post('/buy/limit', async (req, res) => {
 
 /* ─────────────────────────────────────
    POST /api/wallet/connect
-   Подключить TON кошелёк
 ───────────────────────────────────── */
 router.post('/wallet/connect', async (req, res) => {
   try {
@@ -299,7 +338,6 @@ router.post('/wallet/connect', async (req, res) => {
 
 /* ─────────────────────────────────────
    POST /api/wallet/withdraw
-   Запрос на вывод
 ───────────────────────────────────── */
 router.post('/wallet/withdraw', async (req, res) => {
   try {
@@ -327,7 +365,6 @@ router.post('/wallet/withdraw', async (req, res) => {
 
 /* ─────────────────────────────────────
    GET /api/cashbox
-   Текущий остаток кассы (общий для всех)
 ───────────────────────────────────── */
 router.get('/cashbox', async (req, res) => {
   try {
@@ -346,7 +383,6 @@ router.get('/cashbox', async (req, res) => {
 
 /* ─────────────────────────────────────
    GET /api/friends
-   Список рефералов и заработок
 ───────────────────────────────────── */
 router.get('/friends', async (req, res) => {
   try {
@@ -382,21 +418,19 @@ function formatUser(user) {
     coins:             user.coins,
     totalCollected:    user.totalCollected,
     totalDist:         user.totalDist,
-    sessionDist:       user.sessionDist || 0,  // ← ДОБАВЛЕНО
-    sessionLimit:      user.sessionLimit,
-    sessionRuns:       user.sessionRuns,
+    collectorPending:  user.collectorPending || 0,
+    capSeconds:        user.capSeconds || 14400,
+    lastTick:          user.lastTick,
     unlockedLocations: user.unlockedLocations,
     currentLoc:        user.currentLoc,
+    locIncome:         user.locIncome || {},
     activeSkin:        user.activeSkin,
     skinBonus:         user.skinBonus,
     tonWallet:         user.tonWallet,
     referralCount:     user.referralCount,
     referralEarned:    user.referralEarned,
     totalWithdrawn:    user.totalWithdrawn,
-    offlinePending:    user.offlinePending || 0,
-    collectorPending:  user.collectorPending || 0,
-    locIncome:         user.locIncome || {},
-    withdrawals:       user.withdrawals.slice(-10),
+    withdrawals:       (user.withdrawals || []).slice(-10),
   };
 }
 
