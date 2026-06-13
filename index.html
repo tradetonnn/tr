@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Coin Runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="canvas-overlay"></div>
+
+<div id="topbar">
+  <div class="top-inner" style="overflow:hidden;position:relative">
+    <canvas id="nav-particles-top" style="position:absolute;inset:0;pointer-events:none;z-index:0"></canvas>
+    <div class="top-user">
+      <div class="top-av">🎮</div>
+      <div class="top-lvl" id="top-level">Игрок</div>
+    </div>
+    <div class="top-bal">
+      <img class="bal-coin" src="images/ton.png" alt="TON">
+      <div id="balance">0.00000000</div>
+    </div>
+    <div class="top-right">
+      <div id="multiplier-badge">×2</div>
+    </div>
+  </div>
+</div>
+
+<div class="screen active" id="screen-game"></div>
+<div class="screen" id="screen-shop">
+  <div class="scr-head">
+    <div class="scr-title">Локации</div>
+    <div class="scr-sub">Открой локацию — получай доход за каждый метр</div>
+  </div>
+  <div class="scr-body">
+    <div class="loc-grid" id="loc-grid"></div>
+  </div>
+</div>
+
+<!-- ДРУЗЬЯ -->
+<div class="screen" id="screen-friends">
+  <div class="scr-head">
+    <div class="scr-title">Друзья</div>
+    <div class="scr-sub">Приглашай — получай +5% от дохода друга</div>
+  </div>
+  <div class="scr-body">
+    <div class="card">
+      <div class="row">
+        <div class="row-ico" style="background:rgba(124,77,255,.15)">🔗</div>
+        <div class="row-body">
+          <div class="row-title">Реферальная ссылка</div>
+          <div class="row-sub">+5% от дохода каждого друга навсегда</div>
+        </div>
+        <div class="row-end"><button class="btn btn-accent btn-sm" onclick="copyRefLink()">Скопировать</button></div>
+      </div>
+    </div>
+    <div class="sec-lbl">Мои друзья</div>
+    <div class="card">
+      <div class="empty">
+        <div class="empty-ico">👥</div>
+        <div class="empty-title">Пока никого нет</div>
+        <div class="empty-sub">Поделись ссылкой — здесь появятся твои друзья</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ЗАДАНИЯ -->
+<div class="screen" id="screen-tasks">
+  <div class="scr-head">
+    <div class="scr-title">Задания</div>
+    <div class="scr-sub">Скоро появятся новые задания</div>
+  </div>
+  <div class="scr-body">
+    <div class="card">
+      <div class="empty">
+        <div class="empty-ico">📋</div>
+        <div class="empty-title">Пока пусто</div>
+        <div class="empty-sub">Задания появятся в следующем обновлении</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- КОШЕЛЁК -->
+<div class="screen" id="screen-wallet">
+  <div class="scr-head">
+    <div class="scr-title">Кошелёк</div>
+    <div class="scr-sub">Управляй своими TON</div>
+  </div>
+  <div class="scr-body">
+
+    <!-- Баланс -->
+    <div class="card" style="padding:20px 18px;text-align:center;background:linear-gradient(135deg,#180f38,#0f1a34);border-color:rgba(124,77,255,.25)">
+      <div style="font-size:11px;font-weight:700;color:var(--t3);letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">Баланс</div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:8px">
+        <img src="images/ton.png" style="width:24px;height:24px">
+        <div id="w-balance" style="font-size:32px;font-weight:900;color:var(--t1);letter-spacing:-1px;font-variant-numeric:tabular-nums">0.00000000</div>
+      </div>
+      <div style="font-size:12px;color:var(--t3);margin-top:6px">TON</div>
+    </div>
+
+    <!-- Кнопки -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+      <button class="btn btn-accent" style="height:48px;font-size:14px;border-radius:16px" onclick="showWalletAction('deposit')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+        Пополнить
+      </button>
+      <button class="btn btn-surface" style="height:48px;font-size:14px;border-radius:16px;border:1.5px solid rgba(124,77,255,.35)" onclick="showWalletAction('withdraw')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        Вывести
+      </button>
+    </div>
+
+    <!-- Подключение TON Wallet -->
+    <div class="sec-lbl">Подключение</div>
+    <div class="card">
+      <div class="row">
+        <div class="row-ico" style="background:rgba(0,152,234,.15)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0098ea" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 12V8a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/>
+            <path d="M16 12h6v4h-6a2 2 0 0 1 0-4z"/>
+          </svg>
+        </div>
+        <div class="row-body">
+          <div class="row-title">TON Wallet</div>
+          <div class="row-sub">Мин. сумма операции: 1 TON</div>
+        </div>
+        <div class="row-end"><button class="btn btn-accent btn-sm" onclick="showToast('Скоро! 🚀')">Подключить</button></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- СКИНЫ -->
+<div class="screen" id="screen-skins">
+  <div class="scr-head">
+    <div class="scr-title">Скины</div>
+    <div class="scr-sub">+5% к доходу на весь срок действия</div>
+  </div>
+  <div class="scr-body">
+    <div id="skin-bonus-banner" class="card" style="display:none;margin-bottom:10px">
+      <div class="row">
+        <div class="row-ico" style="background:rgba(124,77,255,.18)">⚡</div>
+        <div class="row-body">
+          <div class="row-title">Бонус +5% активен</div>
+          <div class="row-sub" id="skin-bonus-left">—</div>
+        </div>
+        <div class="row-end"><span class="badge b-acc" id="skin-active-name">—</span></div>
+      </div>
+    </div>
+    <div class="skin-grid" id="skin-grid"></div>
+  </div>
+</div>
+
+<!-- Limit upgrade modal -->
+<div id="limit-modal" onclick="if(event.target===this)closeLimitModal()">
+  <div class="lim-sheet">
+    <div class="lim-handle"></div>
+    <div class="lim-title">Увеличить лимит</div>
+    <div class="lim-sub">Пробеги больше — собери больше за одну сессию</div>
+    <div class="lim-current">
+      <div>
+        <div class="lim-cur-label">Текущий лимит</div>
+        <div class="lim-cur-val" id="lim-cur-val">5 000 м</div>
+      </div>
+      <div style="font-size:28px">🏃</div>
+    </div>
+    <div class="lim-upgrades" id="lim-upgrades"></div>
+    <button class="lim-close" onclick="closeLimitModal()">Закрыть</button>
+  </div>
+</div>
+
+<div id="collector">
+  <div class="coll-row">
+    <div class="coll-amount">
+      <img class="coll-ico" src="images/ton.png" alt="">
+      <span class="coll-val" id="coll-val">0.00000000</span>
+    </div>
+    <button class="coll-upg-btn" onclick="openLimitModal()">⬆ Увеличить</button>
+    <button class="coll-btn" id="coll-btn" onclick="collectPending()" disabled>Собрать</button>
+  </div>
+  <div class="coll-track">
+    <div class="coll-fill" id="coll-fill"></div>
+    <div class="coll-track-lbl" id="coll-lim">0 / 27648 м</div>
+  </div>
+</div>
+
+<div id="bottom-nav">
+  <div class="nav-glass" style="overflow:hidden;position:relative">
+    <canvas id="nav-particles-bot" style="position:absolute;inset:0;pointer-events:none;z-index:0;border-radius:22px"></canvas>
+
+    <button class="nav-btn active" id="tab-game" onclick="setTab('game')">
+      <div class="nav-ico">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="6" width="20" height="14" rx="4"/>
+          <path d="M9 13h6M12 10v6"/>
+          <circle cx="17.5" cy="10.5" r=".8" fill="currentColor" stroke="none"/>
+          <circle cx="19.5" cy="12.5" r=".8" fill="currentColor" stroke="none"/>
+        </svg>
+      </div>
+      <div class="nav-lbl">Игра</div>
+    </button>
+
+    <button class="nav-btn" id="tab-shop" onclick="setTab('shop')">
+      <div class="nav-ico">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          <path d="M9 22V12h6v10"/>
+        </svg>
+      </div>
+      <div class="nav-lbl">Локации</div>
+    </button>
+
+    <button class="nav-btn" id="tab-skins" onclick="setTab('skins')">
+      <div class="nav-ico">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        </svg>
+      </div>
+      <div class="nav-lbl">Скины</div>
+    </button>
+
+    <button class="nav-btn" id="tab-friends" onclick="setTab('friends')">
+      <div class="nav-ico">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="7" r="3"/>
+          <path d="M3 21v-2a5 5 0 0 1 5-5h2"/>
+          <circle cx="17" cy="9" r="3"/>
+          <path d="M21 21v-2a5 5 0 0 0-4-4.9"/>
+        </svg>
+      </div>
+      <div class="nav-lbl">Друзья</div>
+    </button>
+
+    <button class="nav-btn" id="tab-tasks" onclick="setTab('tasks')">
+      <div class="nav-ico">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3L22 4"/>
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+        </svg>
+      </div>
+      <div class="nav-lbl">Задания</div>
+    </button>
+
+    <button class="nav-btn" id="tab-wallet" onclick="setTab('wallet')">
+      <div class="nav-ico">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 12V8a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/>
+          <path d="M16 12h6v4h-6a2 2 0 0 1 0-4z"/>
+        </svg>
+      </div>
+      <div class="nav-lbl">Кошелёк</div>
+    </button>
+
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
