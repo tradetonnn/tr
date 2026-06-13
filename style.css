@@ -6,7 +6,7 @@
   --t1:#f0eeff; --t2:rgba(240,238,255,.55); --t3:rgba(240,238,255,.28);
   --rm:14px; --rl:18px; --rmax:999px;
   --font:'Inter',system-ui,sans-serif; --top-h:60px; --nav-h:100px;
-  --tg-offset:55px;
+  --tg-offset:120px;
 }
 *,*::before,*::after { margin:0; padding:0; box-sizing:border-box; }
 html,body {
