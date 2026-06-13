@@ -144,7 +144,8 @@ const Game = {
   playerX: 0, cameraX: 0, speed: 0, groundOffset: 0,
   frame: 0, frameTick: 0, frameDelay: 4,
 };
-// НЕ инициализируем здесь — это делается в loadLocal или start()
+// Город инициализируем сразу после создания Game
+initLocIncome('city');
 const upgradeCosts = [25, 60, 100, 150, 200];
 const SPRITE_FRAMES = 8;
 
@@ -1317,9 +1318,9 @@ function checkCollisions(){
   for (const c of coinList)
     if (c.active && Math.abs(c.x-Game.playerX) < cR) collectCoin(c);
 }
-let _saveLocalCounter = 0;
 function collectCoin(c){
   c.active=false;
+  // Если лимит метров достигнут — монеты не накапливаются
   if (Game.sessionDist < Game.sessionLimit){
     const baseValue = coinValueForLoc(Game.currentLoc);
     const skinMult = Game.skinBonus > Date.now() ? 1.05 : 1;
@@ -1327,8 +1328,6 @@ function collectCoin(c){
     const value = baseValue * mult;
     Game.pendingCoins += value;
     updateCollector();
-    // Сохраняем локально каждые 10 монеток
-    if (++_saveLocalCounter >= 10){ _saveLocalCounter = 0; saveLocal(); }
   }
   for (let i=0;i<12;i++) particles.push({
     x:c.x, y:COIN_Y, vx:rnd(-3,3), vy:rnd(-6,-1),
@@ -1443,116 +1442,11 @@ function buyLimitUpgrade(i){
   updateCollector();
   closeLimitModal();
   showToast(`${u.icon} Лимит: ${fmtLimit(Game.sessionLimit)}`);
-  saveLocal();
   if (getInitData())
     apiRequest('POST', '/api/buy/limit', { upgradeIndex: i }).catch(console.warn);
 }
 
-// ── Локальное хранилище ───────────────
-const SAVE_KEY = 'runton_save';
-
-// Расчёт оффлайн дохода на клиенте
-function calcOfflineIncome(offlineSecs){
-  const MAX_SECS = 8 * 3600; // максимум 8 часов
-  const elapsed  = Math.min(offlineSecs, MAX_SECS);
-  const SECONDS_36 = 36 * 24 * 3600;
-  let total = 0;
-  for (const id of Game.unlocked){
-    const inc = locIncome[id];
-    if (!inc || inc.expired) continue;
-    // Средний доход локации в секунду
-    const loc = LOCATIONS[id];
-    if (!loc) continue;
-    const avgTon     = (loc.incomeMin + loc.incomeMax) / 2;
-    const ratePerSec = avgTon / SECONDS_36;
-    total += ratePerSec * elapsed;
-  }
-  return total;
-}
-
-function saveLocal(){
-  try {
-    // Сохраняем locIncome — данные о доходе локаций
-    const incomeData = {};
-    for (const [id, inc] of Object.entries(locIncome)){
-      incomeData[id] = {
-        ratePerMeter: inc.ratePerMeter,
-        startDist:    inc.startDist,
-        endDist:      inc.endDist,
-        totalTon:     inc.totalTon,
-        expired:      inc.expired,
-      };
-    }
-    localStorage.setItem(SAVE_KEY, JSON.stringify({
-      coins:             Game.coins,
-      totalCollected:    Game.totalCollected,
-      totalDist:         Game.totalDist,
-      sessionDist:       Game.sessionDist,
-      sessionLimit:      isFinite(Game.sessionLimit) ? Game.sessionLimit : 999999999,
-      sessionRuns:       Game.sessionRuns,
-      pendingCoins:      Game.pendingCoins,
-      unlocked:          Array.from(Game.unlocked),
-      currentLoc:        Game.currentLoc,
-      activeSkin:        Game.activeSkin,
-      skinBonus:         Game.skinBonus,
-      locIncome:         incomeData,
-      savedAt:           Date.now(),
-    }));
-  } catch(e){}
-}
-
-function loadLocal(){
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw){
-      // Нет сохранения — инициализируем с нуля
-      initLocIncome('city');
-      return false;
-    }
-    const s = JSON.parse(raw);
-    Game.coins          = s.coins          || 0;
-    Game.totalCollected = s.totalCollected || 0;
-    Game.totalDist      = s.totalDist      || 0;
-    Game.sessionDist    = s.sessionDist    || 0;
-    Game.sessionLimit   = s.sessionLimit >= 999999999 ? Infinity : (s.sessionLimit || 27648);
-    Game.sessionRuns    = s.sessionRuns    || 0;
-    Game.pendingCoins   = s.pendingCoins   || 0;
-    Game.unlocked       = new Set(s.unlocked || ['city']);
-    Game.currentLoc     = s.currentLoc    || 'city';
-    Game.activeSkin     = s.activeSkin    || null;
-    Game.skinBonus      = s.skinBonus     || 0;
-    if (Game.activeSkin) loadSprite(Game.activeSkin);
-
-    // Восстанавливаем locIncome
-    if (s.locIncome && Object.keys(s.locIncome).length > 0){
-      for (const [id, inc] of Object.entries(s.locIncome)){
-        locIncome[id] = { ...inc };
-      }
-    } else {
-      initLocIncome('city');
-    }
-
-    // Оффлайн доход — считаем сколько накопилось пока не было
-    if (s.savedAt){
-      const offlineSecs = (Date.now() - s.savedAt) / 1000;
-      if (offlineSecs > 30){
-        const offlineEarned = calcOfflineIncome(offlineSecs);
-        if (offlineEarned > 0){
-          Game.pendingCoins += offlineEarned;
-          showToast(`💰 За ${Math.round(offlineSecs/60)} мин накопилось ${offlineEarned.toFixed(6)} TON`);
-        }
-      }
-    }
-
-    return true;
-  } catch(e){
-    console.warn('loadLocal error:', e);
-    initLocIncome('city');
-    return false;
-  }
-}
-
-// ── Серверное сохранение ──────────────
+// Хелпер — текущий стейт для сохранения
 function buildSavePayload(){
   return {
     coins:             Game.coins,
@@ -1568,32 +1462,11 @@ function buildSavePayload(){
   };
 }
 
-function saveToServer(){
-  if (!getInitData()) return;
-  apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
-}
-
-// Автосохранение: локально каждые 5 сек, на сервер каждые 30 сек
-setInterval(saveLocal, 5000);
-setInterval(saveToServer, 30000);
-
-// Сохраняем при закрытии/обновлении страницы
-window.addEventListener('beforeunload', () => {
-  saveLocal();
-  // sendBeacon — гарантированно доходит даже при закрытии
-  if (getInitData() && navigator.sendBeacon){
-    const payload = JSON.stringify(buildSavePayload());
-    navigator.sendBeacon(
-      'https://runton-production.up.railway.app/api/save',
-      new Blob([payload], { type: 'application/json' })
-    );
-  }
-});
-
-// Telegram — событие закрытия приложения
-if (window.Telegram?.WebApp){
-  Telegram.WebApp.onEvent('viewportChanged', saveLocal);
-}
+// Автосохранение каждые 60 секунд
+setInterval(() => {
+  if (getInitData())
+    apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
+}, 60000);
 
 /* ═══════════════════════════════════════
    7. ГЛАВНЫЙ ЦИКЛ
@@ -1718,7 +1591,7 @@ function selectLocation(id){
     showToast(`${loc.icon} ${loc.name} открыта! ${inc.totalTon.toFixed(2)} TON за 5.97 млн м`);
     updateUI();
     buildLocCards();
-    saveLocal();
+    // Сохраняем на сервер
     if (getInitData())
       apiRequest('POST', '/api/buy/location', { locationId: id }).catch(console.warn);
   }
@@ -1858,7 +1731,6 @@ function buySkin(id){
   updateUI();
   buildSkinCards();
   showToast(`${s.name} активирован! +5% на ${s.months} мес.`);
-  saveLocal();
   if (getInitData())
     apiRequest('POST', '/api/buy/skin', { skinId: id }).catch(console.warn);
 }
@@ -1886,7 +1758,7 @@ function showToast(msg){
 ═══════════════════════════════════════ */
 
 /* ── API — связь с сервером ── */
-const API_URL = 'https://runton-production.up.railway.app';
+const API_URL = 'https://runton-production.up.railway.app'; // ← замени на свой Railway URL
 
 function getInitData(){
   return window.Telegram?.WebApp?.initData || '';
@@ -2019,28 +1891,23 @@ window.addEventListener('load', async () => {
     const tg = Telegram.WebApp;
     tg.ready();
     tg.expand();
+    // Fullscreen — поддерживается в Telegram 8.0+
     if (tg.requestFullscreen) tg.requestFullscreen();
+    // Отключаем свайп вниз чтобы не закрывал приложение
     if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+
+    // Выставляем CSS-переменную с высотой шапки Telegram
+    // offset задан через --tg-offset в style.css
   }
-
-  // 1. Грузим локальный стейт (включает locIncome и offlineIncome)
-  loadLocal();
-
-  // 2. Стартуем игру с восстановленными данными
-  start();
-  updateCollector();
-  updateUI();
-
-  // 3. Синхронизируем с сервером в фоне (не блокирует игру)
+  // Авторизация + загрузка данных с сервера
   if (getInitData()){
-    (async () => {
-      try {
-        const ref = window.Telegram?.WebApp?.initDataUnsafe?.start_param || null;
-        await apiRequest('POST', '/api/auth', { ref });
-        await syncFromServer();
-      } catch(e){ console.warn('Backend offline, running locally:', e); }
-    })();
+    try {
+      const ref = window.Telegram?.WebApp?.initDataUnsafe?.start_param || null;
+      await apiRequest('POST', '/api/auth', { ref });
+      await syncFromServer();
+    } catch(e){ console.warn('Backend offline, running locally:', e); }
   }
+  start();
 });
 
 /* ═══════════════════════════════════════
