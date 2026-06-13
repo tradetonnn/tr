@@ -140,6 +140,7 @@ const Game = {
   pendingCoins: 0,     // накопленные монеты ждущие сбора
   skinBonus: 0,
   activeSkin: null,
+  tonWallet: null,
   playerX: 0, cameraX: 0, speed: 0, groundOffset: 0,
   frame: 0, frameTick: 0, frameDelay: 4,
 };
@@ -1434,16 +1435,35 @@ function buyLimitUpgrade(i){
   const u = LIMIT_UPGRADES[i];
   if (Game.coins < u.price){ showToast('Не хватает монет 💰'); return; }
   Game.coins -= u.price;
-  if (u.unlimited){
-    Game.sessionLimit = Infinity;
-  } else {
-    Game.sessionLimit += u.add;
-  }
+  Game.sessionLimit = u.unlimited ? Infinity : Game.sessionLimit + u.add;
   updateUI();
   updateCollector();
   closeLimitModal();
   showToast(`${u.icon} Лимит: ${fmtLimit(Game.sessionLimit)}`);
+  if (getInitData())
+    apiRequest('POST', '/api/buy/limit', { upgradeIndex: i }).catch(console.warn);
 }
+
+// Хелпер — текущий стейт для сохранения
+function buildSavePayload(){
+  return {
+    coins:             Game.coins,
+    totalCollected:    Game.totalCollected,
+    totalDist:         Game.totalDist,
+    sessionLimit:      isFinite(Game.sessionLimit) ? Game.sessionLimit : 999999999,
+    sessionRuns:       Game.sessionRuns,
+    unlockedLocations: Array.from(Game.unlocked),
+    currentLoc:        Game.currentLoc,
+    activeSkin:        Game.activeSkin,
+    skinBonus:         Game.skinBonus,
+  };
+}
+
+// Автосохранение каждые 60 секунд
+setInterval(() => {
+  if (getInitData())
+    apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
+}, 60000);
 
 /* ═══════════════════════════════════════
    7. ГЛАВНЫЙ ЦИКЛ
@@ -1568,10 +1588,16 @@ function selectLocation(id){
     showToast(`${loc.icon} ${loc.name} открыта! ${inc.totalTon.toFixed(2)} TON за 5.97 млн м`);
     updateUI();
     buildLocCards();
+    // Сохраняем на сервер
+    if (getInitData())
+      apiRequest('POST', '/api/buy/location', { locationId: id }).catch(console.warn);
   }
   Game.currentLoc = id;
   if (id === 'volcano') initEmbers();
   updateLocCards();
+  // Сохраняем текущую локацию
+  if (getInitData())
+    apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
 }
 
 function updateLocCards(){
@@ -1605,17 +1631,43 @@ function copyRefLink(){
   showToast('Ссылка скопирована! 🔗');
 }
 
+// Касса — хранится локально, в реальном проекте грузится с сервера
+const CASHBOX_MAX = 500;
+let cashboxAmount = 500; // текущий остаток кассы
+
+function updateCashbox(spent){
+  if (spent) cashboxAmount = Math.max(0, cashboxAmount - spent);
+  const pct = cashboxAmount / CASHBOX_MAX;
+  const el_val  = $('cashbox-val');
+  const el_fill = $('cashbox-fill');
+  const el_pct  = $('cashbox-pct');
+  if (el_val)  el_val.textContent  = cashboxAmount.toFixed(2);
+  if (el_pct)  el_pct.textContent  = Math.round(pct * 100) + '%';
+  if (el_fill){
+    el_fill.style.width = (pct * 100).toFixed(1) + '%';
+    // Цвет меняется по заполненности
+    if (pct > 0.5)      el_fill.style.background = 'linear-gradient(90deg,var(--accent),var(--acc-l))';
+    else if (pct > 0.2) el_fill.style.background = 'linear-gradient(90deg,#f59e0b,#fbbf24)';
+    else                el_fill.style.background = 'linear-gradient(90deg,#ef4444,#f87171)';
+  }
+}
+
 function refreshWallet(){
   const el = $('w-balance');
   if (el) el.textContent = Game.coins.toFixed(8);
+  updateCashbox();
 }
 
 function showWalletAction(type){
-  if (Game.coins < 1 && type === 'withdraw'){
-    showToast('Минимальная сумма вывода: 1 TON');
+  if (type === 'withdraw'){
+    if (Game.coins < 1){ showToast('Минимальная сумма вывода: 1 TON'); return; }
+    if (cashboxAmount <= 0){ showToast('Касса пуста, ожидайте пополнения'); return; }
+    // При выводе уменьшаем кассу на сумму вывода (пример: 1 TON)
+    updateCashbox(1);
+    showToast('Вывод — скоро! 🚀');
     return;
   }
-  showToast(type === 'deposit' ? 'Пополнение — скоро! 🚀' : 'Вывод — скоро! 🚀');
+  showToast('Пополнение — скоро! 🚀');
 }
 
 function fmtDuration(ms){
@@ -1676,6 +1728,8 @@ function buySkin(id){
   updateUI();
   buildSkinCards();
   showToast(`${s.name} активирован! +5% на ${s.months} мес.`);
+  if (getInitData())
+    apiRequest('POST', '/api/buy/skin', { skinId: id }).catch(console.warn);
 }
 
 
@@ -1701,7 +1755,7 @@ function showToast(msg){
 ═══════════════════════════════════════ */
 
 /* ── API — связь с сервером ── */
-const API_URL = 'https://runton-production.up.railway.app/'; // ← замени на свой Railway URL
+const API_URL = 'https://your-app.railway.app'; // ← замени на свой Railway URL
 
 function getInitData(){
   return window.Telegram?.WebApp?.initData || '';
@@ -1727,15 +1781,93 @@ async function syncFromServer(){
     Game.coins          = u.coins;
     Game.totalCollected = u.totalCollected;
     Game.totalDist      = u.totalDist;
-    Game.sessionLimit   = u.sessionLimit;
+    Game.sessionLimit   = u.sessionLimit >= 999999999 ? Infinity : u.sessionLimit;
     Game.sessionRuns    = u.sessionRuns;
     Game.unlocked       = new Set(u.unlockedLocations);
     Game.currentLoc     = u.currentLoc;
     Game.activeSkin     = u.activeSkin;
     Game.skinBonus      = u.skinBonus;
+    Game.tonWallet      = u.tonWallet || null;
     if (u.activeSkin) loadSprite(u.activeSkin);
     updateUI(); buildLocCards(); updateCollector();
+
+    // Показываем оффлайн доход если есть
+    if (u.offlinePending > 0) showOfflineModal(u.offlinePending);
+
+    // Загружаем кассу
+    const cb = await apiRequest('GET', '/api/cashbox');
+    if (cb.ok) { cashboxAmount = cb.cashbox; updateCashbox(); }
   } catch(e){ console.warn('syncFromServer failed:', e); }
+}
+
+function showOfflineModal(amount){
+  showToast(`💰 Пока тебя не было, накопилось ${amount.toFixed(6)} TON!`);
+  // Забираем оффлайн доход
+  apiRequest('POST', '/api/offline/collect').then(r => {
+    if (r.ok && r.earned > 0){
+      Game.coins          += r.earned;
+      Game.totalCollected += r.earned;
+      updateUI();
+    }
+  }).catch(console.warn);
+}
+
+// Ping каждые 30 секунд — обновляем lastOnline
+setInterval(() => {
+  if (getInitData()) apiRequest('POST', '/api/ping').catch(()=>{});
+}, 30000);
+
+function refreshWallet(){
+  const el = $('w-balance');
+  if (el) el.textContent = Game.coins.toFixed(8);
+  // Показываем подключённый кошелёк
+  const walletEl = $('wallet-address');
+  if (walletEl) walletEl.textContent = Game.tonWallet
+    ? Game.tonWallet.slice(0,6)+'...'+Game.tonWallet.slice(-4)
+    : 'Не подключён';
+  updateCashbox();
+  // Загружаем актуальную кассу с сервера
+  if (getInitData())
+    apiRequest('GET', '/api/cashbox').then(cb => { if(cb.ok){ cashboxAmount=cb.cashbox; updateCashbox(); } }).catch(()=>{});
+}
+
+function showWalletAction(type){
+  if (type === 'withdraw'){
+    if (Game.coins < 1){ showToast('Минимальная сумма вывода: 1 TON'); return; }
+    if (!Game.tonWallet){ showToast('Сначала подключи TON кошелёк'); return; }
+    if (cashboxAmount <= 0){ showToast('Касса пуста, ожидайте пополнения'); return; }
+    if (getInitData()){
+      apiRequest('POST', '/api/wallet/withdraw', { amount: 1 })
+        .then(r => {
+          if (r.ok){
+            Game.coins = r.coins;
+            updateCashbox(1);
+            updateUI();
+            showToast('Заявка на вывод отправлена! ✅');
+          } else {
+            showToast(r.error || 'Ошибка вывода');
+          }
+        }).catch(() => showToast('Ошибка соединения'));
+    } else {
+      showToast('Вывод — скоро! 🚀');
+    }
+    return;
+  }
+  showToast('Пополнение — скоро! 🚀');
+}
+
+function connectWallet(){
+  const addr = prompt('Введи адрес TON кошелька:');
+  if (!addr) return;
+  if (!addr.startsWith('UQ') && !addr.startsWith('EQ')){
+    showToast('Неверный формат адреса'); return;
+  }
+  Game.tonWallet = addr;
+  if (getInitData())
+    apiRequest('POST', '/api/wallet/connect', { tonAddress: addr })
+      .then(() => { showToast('Кошелёк подключён! ✅'); refreshWallet(); })
+      .catch(() => showToast('Ошибка подключения'));
+  else { showToast('Кошелёк сохранён локально'); refreshWallet(); }
 }
 
 function start(){
