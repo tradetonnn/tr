@@ -1451,6 +1451,17 @@ const SAVE_KEY = 'runton_save';
 
 function saveLocal(){
   try {
+    // Сохраняем locIncome — данные о доходе локаций
+    const incomeData = {};
+    for (const [id, inc] of Object.entries(locIncome)){
+      incomeData[id] = {
+        ratePerMeter: inc.ratePerMeter,
+        startDist:    inc.startDist,
+        endDist:      inc.endDist,
+        totalTon:     inc.totalTon,
+        expired:      inc.expired,
+      };
+    }
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       coins:             Game.coins,
       totalCollected:    Game.totalCollected,
@@ -1463,6 +1474,7 @@ function saveLocal(){
       currentLoc:        Game.currentLoc,
       activeSkin:        Game.activeSkin,
       skinBonus:         Game.skinBonus,
+      locIncome:         incomeData,
       savedAt:           Date.now(),
     }));
   } catch(e){}
@@ -1485,6 +1497,16 @@ function loadLocal(){
     Game.activeSkin     = s.activeSkin    || null;
     Game.skinBonus      = s.skinBonus     || 0;
     if (Game.activeSkin) loadSprite(Game.activeSkin);
+
+    // Восстанавливаем locIncome — прогресс локаций
+    if (s.locIncome){
+      for (const [id, inc] of Object.entries(s.locIncome)){
+        locIncome[id] = { ...inc };
+      }
+    } else {
+      // Если нет сохранённых — инициализируем заново
+      initLocIncome('city');
+    }
     return true;
   } catch(e){ return false; }
 }
