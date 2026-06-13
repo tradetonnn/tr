@@ -37,7 +37,7 @@ router.post('/auth', async (req, res) => {
       const lastOnline = new Date(user.lastOnline).getTime();
       const offlineSecs = Math.max(0, (now - lastOnline) / 1000);
 
-      if (offlineSecs > 60) { // минимум минута оффлайна
+      if (offlineSecs > 60) {
         const earned = calcOfflineIncome(
           user.unlockedLocations,
           offlineSecs,
@@ -130,14 +130,14 @@ router.get('/user', async (req, res) => {
 ───────────────────────────────────── */
 router.post('/save', async (req, res) => {
   try {
-    const { coins, totalCollected, totalDist, sessionLimit,
-            sessionRuns, unlockedLocations, currentLoc,
+    const { coins, totalCollected, totalDist, sessionDist,
+            sessionLimit, sessionRuns, unlockedLocations, currentLoc,
             activeSkin, skinBonus } = req.body;
 
     await User.updateOne(
       { telegramId: req.telegramUser.id },
       { $set: {
-          coins, totalCollected, totalDist,
+          coins, totalCollected, totalDist, sessionDist,
           sessionLimit, sessionRuns,
           unlockedLocations, currentLoc,
           activeSkin, skinBonus,
@@ -160,21 +160,21 @@ router.post('/collect', async (req, res) => {
     if (typeof amount !== 'number' || amount < 0)
       return res.status(400).json({ error: 'Invalid amount' });
 
-    const user = await User.findOneAndUpdate(
-      { telegramId: req.telegramUser.id },
-      { $inc: {
-          coins:          amount,
-          totalCollected: amount,
-          totalDist:      sessionDist || 0,
-          sessionRuns:    1,
-        },
-        $set: { updatedAt: Date.now() }
-      },
-      { new: true }
-    );
+    const user = await User.findOne({ telegramId: req.telegramUser.id });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+
+    // Обновляем все поля
+    user.coins          += amount;
+    user.totalCollected += amount;
+    user.totalDist      += sessionDist || 0;
+    user.sessionDist     = 0;
+    user.sessionRuns    += 1;
+    user.updatedAt       = Date.now();
+    
+    await user.save();
 
     // +5% рефереру
-    if (user.referredBy) {
+    if (user.referredBy && amount > 0) {
       const bonus = amount * 0.05;
       await User.updateOne(
         { telegramId: user.referredBy },
@@ -327,7 +327,6 @@ router.post('/wallet/withdraw', async (req, res) => {
 ───────────────────────────────────── */
 router.get('/cashbox', async (req, res) => {
   try {
-    // Сумма всех pending выводов вычитается из 500
     const pending = await User.aggregate([
       { $unwind: '$withdrawals' },
       { $match:  { 'withdrawals.status': 'pending' } },
@@ -379,6 +378,7 @@ function formatUser(user) {
     coins:             user.coins,
     totalCollected:    user.totalCollected,
     totalDist:         user.totalDist,
+    sessionDist:       user.sessionDist || 0,  // ← ДОБАВЛЕНО
     sessionLimit:      user.sessionLimit,
     sessionRuns:       user.sessionRuns,
     unlockedLocations: user.unlockedLocations,
