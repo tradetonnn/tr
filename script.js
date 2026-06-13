@@ -67,59 +67,46 @@ const SKINS = {
   astro:   { name:'Сбежавшая', icon:'p4', emoji:'p4', bg:'linear-gradient(135deg,#050520,#1a0a40)', months:12, price:90,  desc:'За пределами вселенной' },
 };
 
-// Доход от монеток = единственный источник.
-// Локация действует METERS_36 метров (= 36 дней непрерывного бега).
-// distPerFrame = BASE_SPEED/W * 8 = 0.004 * 8 = 0.032 м/кадр
-// При 60fps: 0.032 * 60 = 1.92 м/сек
-// За 36 дней = 1.92 * 36*24*3600 = 5 971 968 м
-const METERS_36 = 5971968; // метров = 36 дней игры
+// ════════════════════════════════════════════════════
+// IDLE-ЭКОНОМИКА (зеркало серверного income.js).
+// Время = деньги. Доход капает по времени, онлайн или нет.
+// Источник истины — Game.lastTick (момент, до которого начислено).
+// ════════════════════════════════════════════════════
+const SECONDS_36     = 36 * 24 * 3600;   // полный срок локации (сек)
+const METERS_36      = 5971968;          // "метров" за полный срок
+const METERS_PER_SEC = 1.92;             // скорость прохождения
+const CAP_BASE_SEC   = 4 * 3600;         // базовый бак коллектора — 4 часа
 
-// Монет за METERS_36: COIN_SPACING/W=0.38, BASE_SPEED/W=0.004
-// Монет/метр = 1 / (COIN_SPACING / (BASE_SPEED/frame * distPerFrame^-1))
-// Проще: между монетами COIN_SPACING пикс, distPerFrame = BASE_SPEED
-// Метров между монетами = COIN_SPACING / BASE_SPEED * distPerFrame
-//   = (W*0.38) / (W*0.004) * (W*0.004/W*8) = 0.38/0.004 * 0.032 = 95 * 0.032 = 3.04 м/монету
-const METERS_PER_COIN = (0.38 / 0.004) * (0.004 * 8); // = 3.04 м/монету
-const SESSION_LIMIT_BASE = 27648; // 4 часа
-const METERS_PER_HOUR = 6912; // 1 час = 3600 * 1.92 // базовый лимит метров
-
-// locIncome[id] = {ratePerMeter: TON/м, startDist: м, endDist: м, totalTon, expired}
+// locIncome[id] = { totalTon, startTime(ms), endTime(ms), expired }
 const locIncome = {};
 
 function initLocIncome(id){
   const loc = LOCATIONS[id];
   const totalTon = loc.incomeMin + Math.random() * (loc.incomeMax - loc.incomeMin);
-  const ratePerMeter = totalTon / METERS_36; // TON/метр
-  const startDist = Game.totalDist;
-  locIncome[id] = {
-    ratePerMeter,
-    startDist,
-    endDist: startDist + METERS_36,
-    totalTon,
-    expired: false
-  };
+  const now = Date.now();
+  locIncome[id] = { totalTon, startTime: now, endTime: now + SECONDS_36 * 1000, expired: false };
 }
 
-// Стоимость одной монетки: ratePerMeter * METERS_PER_COIN
-function coinValueForLoc(id){
+// Ставка активной локации TON/сек
+function ratePerSecond(id){
   const inc = locIncome[id];
   if (!inc || inc.expired) return 0;
-  if (Game.totalDist >= inc.endDist) return 0;
-  return inc.ratePerMeter * METERS_PER_COIN;
+  return inc.totalTon / SECONDS_36;
 }
 
-// Проверка истечения — вызывать каждый кадр (дёшево, просто сравнение)
+// Истечение локаций по времени
 function checkLocExpiry(){
+  const now = Date.now();
   for (const id of Array.from(Game.unlocked)){
     const inc = locIncome[id];
     if (!inc || inc.expired) continue;
-    if (Game.totalDist >= inc.endDist){
-      inc.expired = true;
+    if (now >= inc.endTime){
       if (id === 'city'){
         initLocIncome('city');
       } else {
+        inc.expired = true;
         Game.unlocked.delete(id);
-        if (Game.currentLoc === id){ Game.currentLoc = 'city'; }
+        if (Game.currentLoc === id) Game.currentLoc = 'city';
         showToast(`${LOCATIONS[id].icon} ${LOCATIONS[id].name} закрылась! Открой снова.`);
         buildLocCards();
       }
@@ -127,17 +114,35 @@ function checkLocExpiry(){
   }
 }
 
+// ── Начислить доход за прошедшее время в коллектор ──
+function accrueIncome(){
+  const now = Date.now();
+  const last = Game.lastTick || now;
+  let elapsed = (now - last) / 1000;
+  if (elapsed <= 0){ Game.lastTick = now; return 0; }
+  checkLocExpiry();
+  const cap = Game.capSeconds || CAP_BASE_SEC;
+  const effective = Math.min(elapsed, cap);
+  let earned = ratePerSecond(Game.currentLoc) * effective;
+  if (Game.skinBonus && Game.skinBonus > now) earned *= 1.05;
+  if (earned > 0){
+    Game.pendingCoins += earned;
+    Game.totalDist    += effective * METERS_PER_SEC;
+  }
+  Game.lastTick = now;
+  return earned;
+}
+
 const Game = {
   coins: 0,
-  speedLevel: 0,
   upgrades: [false,false,false,false,false],
   currentLoc: 'city',
   unlocked: new Set(['city']),
   totalCollected: 0,
   totalDist: 0,
-  sessionDist: 0,      // метры текущей сессии (сбрасывается при сборе)
-  sessionLimit: 27648,  // 4 часа (4 * 3600 * 1.92)
-  pendingCoins: 0,     // накопленные монеты ждущие сбора
+  pendingCoins: 0,
+  lastTick: Date.now(),
+  capSeconds: CAP_BASE_SEC,
   skinBonus: 0,
   activeSkin: null,
   tonWallet: null,
@@ -1317,19 +1322,9 @@ function checkCollisions(){
   for (const c of coinList)
     if (c.active && Math.abs(c.x-Game.playerX) < cR) collectCoin(c);
 }
-let _saveLocalCounter = 0;
+// Монетки — чистый визуал. Доход начисляется по времени в accrueIncome().
 function collectCoin(c){
   c.active=false;
-  if (Game.sessionDist < Game.sessionLimit){
-    const baseValue = coinValueForLoc(Game.currentLoc);
-    const skinMult = Game.skinBonus > Date.now() ? 1.05 : 1;
-    const mult = ((Game.upgrades[2] ? 2 : 1) + (Game.upgrades[3] ? 5 : 0)) * skinMult;
-    const value = baseValue * mult;
-    Game.pendingCoins += value;
-    updateCollector();
-    // Сохраняем локально каждые 10 монеток
-    if (++_saveLocalCounter >= 10){ _saveLocalCounter = 0; saveLocal(); }
-  }
   for (let i=0;i<12;i++) particles.push({
     x:c.x, y:COIN_Y, vx:rnd(-3,3), vy:rnd(-6,-1),
     r:rnd(1,COIN_R*0.28+1), color:Math.random()>0.5?'#ffe066':'#f0a500', life:1,
@@ -1338,48 +1333,70 @@ function collectCoin(c){
 }
 
 function collectPending(){
-  if (Game.pendingCoins <= 0) return;
-  const amount      = Game.pendingCoins;
-  const sessionDist = Game.sessionDist;  // ← сохраняем перед сбросом
-  
+  // Сначала доначисляем доход за время до момента сбора
+  accrueIncome();
+  if (Game.pendingCoins <= 0){ updateCollector(); return; }
+  const amount = Game.pendingCoins;
+
   Game.coins          += amount;
   Game.totalCollected += amount;
   Game.pendingCoins    = 0;
-  Game.sessionDist     = 0;
-  Game.sessionRuns    += 1;
   updateUI();
   updateCollector();
-  showToast('Монеты собраны! 💰');
-  
-  // Сохраняем на сервер асинхронно
+  showToast('Собрано! 💰');
+  saveLocal();
+
+  // Сервер авторитетно собирает из коллектора (берёт своё значение)
   if (getInitData()){
-    apiRequest('POST', '/api/collect', { amount, sessionDist }).catch(console.warn);
+    apiRequest('POST', '/api/collect').then(r => {
+      if (r && r.ok){
+        Game.coins = r.coins;          // синхронизируем с сервером
+        Game.pendingCoins = 0;
+        updateUI(); updateCollector();
+      }
+    }).catch(console.warn);
   }
 }
 
+// Сколько секунд накопления "влезает" в коллектор по текущей ставке.
+// Полоска = заполнение бака (capSeconds) накопленным доходом.
+function collectorFillPct(){
+  const rate = ratePerSecond(Game.currentLoc);       // TON/сек
+  const cap  = Game.capSeconds || CAP_BASE_SEC;       // бак в секундах
+  if (rate <= 0 || !isFinite(cap)) return 0;
+  const maxByCap = rate * cap;                         // максимум TON в баке
+  if (maxByCap <= 0) return 0;
+  return Math.min(1, Game.pendingCoins / maxByCap);
+}
+
+function fmtDur(sec){
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+  if (h > 0) return `${h}ч ${m}м`;
+  if (m > 0) return `${m}м`;
+  return `${sec}с`;
+}
+
 function updateCollector(){
-  const limited = isFinite(Game.sessionLimit);
-  const pct  = limited ? Math.min(1, Game.sessionDist / Game.sessionLimit) : 0;
-  const full = limited && pct >= 1;
+  const pct  = collectorFillPct();
+  const full = pct >= 1;
   const fillEl = $('coll-fill');
   const btnEl  = $('coll-btn');
   const valEl  = $('coll-val');
   const limEl  = $('coll-lim');
   if (valEl) valEl.textContent = Game.pendingCoins.toFixed(8);
   if (limEl){
-    const done = Math.round(Game.sessionDist);
-    limEl.textContent = limited
-      ? done.toLocaleString() + ' / ' + Game.sessionLimit.toLocaleString() + ' м'
-      : done.toLocaleString() + ' м  ♾️';
+    const cap = Game.capSeconds || CAP_BASE_SEC;
+    limEl.textContent = `${fmtDur(pct*cap)} / ${fmtDur(cap)}`;
   }
   if (fillEl){
-    fillEl.style.width = limited ? (pct*100).toFixed(1)+'%' : '0%';
+    fillEl.style.width = (pct*100).toFixed(1)+'%';
     fillEl.classList.toggle('full', full);
   }
   if (btnEl){
     btnEl.disabled = Game.pendingCoins <= 0;
     btnEl.classList.toggle('full', full);
-    btnEl.textContent = full ? '⚡ Собрать' : 'Собрать';
+    btnEl.textContent = full ? '⚡ Бак полон' : 'Собрать';
   }
 }
 function autoCollect(){
@@ -1394,23 +1411,24 @@ function autoCollect(){
 }
 
 /* ── Limit modal ── */
+// Апгрейды бака коллектора. add — в СЕКУНДАХ (1ч=3600).
 const LIMIT_UPGRADES = [
-  { icon:'⏱️', name:'+1 час',   add:6912,    price:1,  desc:'+6 912 м',  unlimited:false },
-  { icon:'⏰', name:'+5 часов', add:34560,   price:5,  desc:'+34 560 м', unlimited:false },
-  { icon:'🕐', name:'+10 часов',add:69120,   price:10, desc:'+69 120 м', unlimited:false },
-  { icon:'♾️', name:'Безлимит', add:Infinity, price:30, desc:'Навсегда', unlimited:true  },
+  { icon:'⏱️', name:'+1 час',   add:3600,       price:1,  desc:'+1 час накопления',  unlimited:false },
+  { icon:'⏰', name:'+5 часов', add:5*3600,     price:5,  desc:'+5 часов',           unlimited:false },
+  { icon:'🕐', name:'+10 часов',add:10*3600,    price:10, desc:'+10 часов',          unlimited:false },
+  { icon:'♾️', name:'Безлимит', add:9999*3600,  price:30, desc:'Огромный бак', unlimited:true  },
 ];
 
-function fmtLimit(m){
-  if (!isFinite(m)) return '♾️ Безлимит';
-  const h = Math.round(m / 6912);
+function fmtLimit(sec){
+  if (!isFinite(sec) || sec >= 9999*3600) return '♾️ Безлимит';
+  const h = Math.round(sec / 3600);
   return h + ' ч';
 }
 
 function openLimitModal(){
   const grid = $('lim-upgrades');
-  $('lim-cur-val').textContent = fmtLimit(Game.sessionLimit);
-  const isUnlimited = !isFinite(Game.sessionLimit);
+  $('lim-cur-val').textContent = fmtLimit(Game.capSeconds);
+  const isUnlimited = (Game.capSeconds || 0) >= 9999*3600;
   grid.innerHTML = LIMIT_UPGRADES.map((u,i) => {
     const bought = u.unlimited && isUnlimited;
     return `
@@ -1438,65 +1456,49 @@ function buyLimitUpgrade(i){
   const u = LIMIT_UPGRADES[i];
   if (Game.coins < u.price){ showToast('Не хватает монет 💰'); return; }
   Game.coins -= u.price;
-  Game.sessionLimit = u.unlimited ? Infinity : Game.sessionLimit + u.add;
+  Game.capSeconds = u.unlimited ? (9999*3600) : (Game.capSeconds || CAP_BASE_SEC) + u.add;
   updateUI();
   updateCollector();
   closeLimitModal();
-  showToast(`${u.icon} Лимит: ${fmtLimit(Game.sessionLimit)}`);
+  showToast(`${u.icon} Бак: ${fmtLimit(Game.capSeconds)}`);
   saveLocal();
   if (getInitData())
-    apiRequest('POST', '/api/buy/limit', { upgradeIndex: i }).catch(console.warn);
+    apiRequest('POST', '/api/buy/limit', { upgradeIndex: i }).then(r=>{
+      if (r && r.ok && r.user){ Game.capSeconds = r.user.capSeconds; Game.coins = r.user.coins; updateUI(); updateCollector(); }
+    }).catch(console.warn);
 }
 
 // ── Локальное хранилище ───────────────
 const SAVE_KEY = 'runton_save';
 
-// Расчёт оффлайн дохода на клиенте
-function calcOfflineIncome(offlineSecs){
-  const MAX_SECS = 8 * 3600; // максимум 8 часов
-  const elapsed  = Math.min(offlineSecs, MAX_SECS);
-  const SECONDS_36 = 36 * 24 * 3600;
-  let total = 0;
-  for (const id of Game.unlocked){
-    const inc = locIncome[id];
-    if (!inc || inc.expired) continue;
-    // Средний доход локации в секунду
-    const loc = LOCATIONS[id];
-    if (!loc) continue;
-    const avgTon     = (loc.incomeMin + loc.incomeMax) / 2;
-    const ratePerSec = avgTon / SECONDS_36;
-    total += ratePerSec * elapsed;
+// Локации в простой объект (totalTon + сроки по времени)
+function buildLocIncomeData(){
+  const data = {};
+  for (const [id, inc] of Object.entries(locIncome)){
+    data[id] = {
+      totalTon:  inc.totalTon,
+      startTime: inc.startTime,
+      endTime:   inc.endTime,
+      expired:   inc.expired,
+    };
   }
-  return total;
+  return data;
 }
 
 function saveLocal(){
   try {
-    // Сохраняем locIncome — данные о доходе локаций
-    const incomeData = {};
-    for (const [id, inc] of Object.entries(locIncome)){
-      incomeData[id] = {
-        ratePerMeter: inc.ratePerMeter,
-        startDist:    inc.startDist,
-        endDist:      inc.endDist,
-        totalTon:     inc.totalTon,
-        expired:      inc.expired,
-      };
-    }
     localStorage.setItem(SAVE_KEY, JSON.stringify({
-      coins:             Game.coins,
-      totalCollected:    Game.totalCollected,
-      totalDist:         Game.totalDist,
-      sessionDist:       Game.sessionDist,
-      sessionLimit:      isFinite(Game.sessionLimit) ? Game.sessionLimit : 999999999,
-      sessionRuns:       Game.sessionRuns,
-      pendingCoins:      Game.pendingCoins,
-      unlocked:          Array.from(Game.unlocked),
-      currentLoc:        Game.currentLoc,
-      activeSkin:        Game.activeSkin,
-      skinBonus:         Game.skinBonus,
-      locIncome:         incomeData,
-      savedAt:           Date.now(),
+      coins:          Game.coins,
+      totalCollected: Game.totalCollected,
+      totalDist:      Game.totalDist,
+      pendingCoins:   Game.pendingCoins,
+      lastTick:       Game.lastTick,
+      capSeconds:     Game.capSeconds,
+      unlocked:       Array.from(Game.unlocked),
+      currentLoc:     Game.currentLoc,
+      activeSkin:     Game.activeSkin,
+      skinBonus:      Game.skinBonus,
+      locIncome:      buildLocIncomeData(),
     }));
   } catch(e){}
 }
@@ -1505,7 +1507,7 @@ function loadLocal(){
   try {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw){
-      // Нет сохранения — инициализируем с нуля
+      Game.lastTick = Date.now();
       initLocIncome('city');
       return false;
     }
@@ -1513,17 +1515,15 @@ function loadLocal(){
     Game.coins          = s.coins          || 0;
     Game.totalCollected = s.totalCollected || 0;
     Game.totalDist      = s.totalDist      || 0;
-    Game.sessionDist    = s.sessionDist    || 0;
-    Game.sessionLimit   = s.sessionLimit >= 999999999 ? Infinity : (s.sessionLimit || 27648);
-    Game.sessionRuns    = s.sessionRuns    || 0;
     Game.pendingCoins   = s.pendingCoins   || 0;
+    Game.capSeconds     = s.capSeconds     || CAP_BASE_SEC;
     Game.unlocked       = new Set(s.unlocked || ['city']);
-    Game.currentLoc     = s.currentLoc    || 'city';
-    Game.activeSkin     = s.activeSkin    || null;
-    Game.skinBonus      = s.skinBonus     || 0;
+    Game.currentLoc     = s.currentLoc     || 'city';
+    Game.activeSkin     = s.activeSkin     || null;
+    Game.skinBonus      = s.skinBonus      || 0;
     if (Game.activeSkin) loadSprite(Game.activeSkin);
 
-    // Восстанавливаем locIncome
+    // Восстанавливаем локации (со сроками по времени)
     if (s.locIncome && Object.keys(s.locIncome).length > 0){
       for (const [id, inc] of Object.entries(s.locIncome)){
         locIncome[id] = { ...inc };
@@ -1531,66 +1531,50 @@ function loadLocal(){
     } else {
       initLocIncome('city');
     }
+    if (!locIncome.city) initLocIncome('city');
 
-    // Оффлайн доход — точно по метке времени savedAt, до секунды, без ping
-    if (s.savedAt){
-      const offlineSecs = (Date.now() - s.savedAt) / 1000;
-      if (offlineSecs >= 1){
-        const offlineEarned = calcOfflineIncome(offlineSecs);
-        if (offlineEarned > 0){
-          Game.pendingCoins += offlineEarned;
-          const mins = Math.floor(offlineSecs / 60);
-          const label = mins >= 1 ? `${mins} мин` : `${Math.round(offlineSecs)} сек`;
-          showToast(`💰 За ${label} накопилось ${offlineEarned.toFixed(6)} TON`);
-        }
-      }
+    // lastTick — момент, до которого доход был начислен.
+    Game.lastTick = s.lastTick || Date.now();
+
+    // Доначисляем доход за время отсутствия (точно по lastTick, до секунды).
+    const before = Game.pendingCoins;
+    accrueIncome();
+    const earned = Game.pendingCoins - before;
+    if (earned > 0){
+      const secs = Math.min((Date.now() - (s.lastTick||Date.now()))/1000, Game.capSeconds);
+      const mins = Math.floor(secs/60);
+      const label = mins >= 1 ? `${mins} мин` : `${Math.round(secs)} сек`;
+      showToast(`💰 За ${label} накопилось ${earned.toFixed(6)} TON`);
     }
-
     return true;
   } catch(e){
     console.warn('loadLocal error:', e);
+    Game.lastTick = Date.now();
     initLocIncome('city');
     return false;
   }
 }
 
 // ── Серверное сохранение ──────────────
+// Доход НЕ шлём (сервер считает сам по lastTick). Шлём только настройки.
 function buildSavePayload(){
   return {
-    coins:             Game.coins,
-    totalCollected:    Game.totalCollected,
-    totalDist:         Game.totalDist,
-    sessionDist:       Game.sessionDist,  // ← ДОБАВИТЬ
-    sessionLimit:      isFinite(Game.sessionLimit) ? Game.sessionLimit : 999999999,
-    sessionRuns:       Game.sessionRuns,
-    unlockedLocations: Array.from(Game.unlocked),
     currentLoc:        Game.currentLoc,
     activeSkin:        Game.activeSkin,
     skinBonus:         Game.skinBonus,
-    collectorPending:  Game.pendingCoins,
-    locIncome:         buildLocIncomeData(),
+    capSeconds:        Game.capSeconds,
+    unlockedLocations: Array.from(Game.unlocked),
   };
-}
-
-// Сборка locIncome в простой объект для сохранения
-function buildLocIncomeData(){
-  const data = {};
-  for (const [id, inc] of Object.entries(locIncome)){
-    data[id] = {
-      ratePerMeter: inc.ratePerMeter,
-      startDist:    inc.startDist,
-      endDist:      inc.endDist,
-      totalTon:     inc.totalTon,
-      expired:      inc.expired,
-    };
-  }
-  return data;
 }
 
 function saveToServer(){
   if (!getInitData()) return;
   apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
 }
+
+// Idle-тик: начисляем доход и в фоне (когда rAF спит).
+// accrueIncome идемпотентен по времени — двойного начисления нет.
+setInterval(() => { accrueIncome(); updateCollector(); }, 1000);
 
 // Автосохранение: локально каждые 5 сек, на сервер каждые 30 сек
 setInterval(saveLocal, 5000);
@@ -1615,10 +1599,10 @@ if (window.Telegram?.WebApp){
 }
 
 // На мобильных beforeunload часто не срабатывает при сворачивании.
-// visibilitychange ловит уход в фон — ставим свежий savedAt, чтобы
-// оффлайн-доход считался точно с этого момента.
+// При уходе в фон фиксируем доход (accrue) и сохраняем lastTick.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden'){
+    accrueIncome();
     saveLocal();
     if (getInitData() && navigator.sendBeacon){
       const payload = JSON.stringify(buildSavePayload());
@@ -1639,17 +1623,14 @@ function loop(){
 
   Game.playerX += Game.speed;
   Game.groundOffset += Game.speed;
-  Game.totalDist += Game.speed / (W||400) * 8;
-  if (Game.sessionDist < Game.sessionLimit)
-    Game.sessionDist += Game.speed / (W||400) * 8;
+
+  // Доход капает по времени (totalDist растёт внутри accrueIncome)
+  accrueIncome();
 
   // Обновлять коллектор раз в 10 кадров
   if (++_collFrame >= 10){ _collFrame = 0; updateCollector(); }
   if (++Game.frameTick >= Game.frameDelay){ Game.frameTick=0; Game.frame=(Game.frame+1)%SPRITE_FRAMES; }
   Game.cameraX += (Game.playerX-CAM_LEAD-Game.cameraX)*0.12;
-
-  // Проверка истечения локаций по метрам
-  checkLocExpiry();
 
   checkCollisions();
   updateSpeedLines(th);
@@ -1683,11 +1664,16 @@ function loop(){
 /* ═══════════════════════════════════════
    8. UI: магазин, табы, апгрейды, тосты
 ═══════════════════════════════════════ */
-function fmtMetersLeft(m){
-  if (m <= 0) return 'Истекло';
-  if (m >= 1000000) return (m/1000000).toFixed(2) + ' млн м';
-  if (m >= 1000) return (m/1000).toFixed(1) + ' км';
-  return Math.round(m) + ' м';
+function fmtTimeLeft(ms){
+  if (ms <= 0) return 'Истекло';
+  const sec = Math.floor(ms/1000);
+  const d = Math.floor(sec/86400);
+  const h = Math.floor((sec%86400)/3600);
+  const m = Math.floor((sec%3600)/60);
+  if (d > 0) return `${d}д ${h}ч`;
+  if (h > 0) return `${h}ч ${m}м`;
+  if (m > 0) return `${m}м`;
+  return `${sec}с`;
 }
 
 function buildLocCards(){
@@ -1695,11 +1681,12 @@ function buildLocCards(){
   grid.innerHTML = Object.entries(LOCATIONS).map(([id,l]) => {
     const unlocked = Game.unlocked.has(id);
     const inc = locIncome[id];
-    const metersLeft = inc ? Math.max(0, inc.endDist - Game.totalDist) : 0;
-    const progress = inc ? Math.min(1, (Game.totalDist - inc.startDist) / METERS_36) : 0;
+    const now = Date.now();
+    const timeLeft = inc ? Math.max(0, inc.endTime - now) : 0;
+    const progress = inc ? Math.min(1, (now - inc.startTime) / (SECONDS_36*1000)) : 0;
     let incomeLabel = id === 'city'
-      ? `~1 TON / 5.97 млн м`
-      : `${l.incomeMin}–${l.incomeMax} TON / 5.97 млн м`;
+      ? `~1 TON / срок`
+      : `${l.incomeMin}–${l.incomeMax} TON / срок`;
     return `
     <div class="loc-card" id="loc-${id}" onclick="selectLocation('${id}')">
       <div class="loc-banner" style="background:${l.bg}">
@@ -1710,7 +1697,7 @@ function buildLocCards(){
         <div class="loc-name">${l.name}</div>
         <div class="loc-income"><img class="c-dot" src="images/ton.png" alt="TON">${incomeLabel}</div>
         ${unlocked && inc
-          ? `<div class="loc-desc" id="timer-${id}">🏃 осталось ${fmtMetersLeft(metersLeft)}</div>
+          ? `<div class="loc-desc" id="timer-${id}">⏳ осталось ${fmtTimeLeft(timeLeft)}</div>
              <div class="prog" style="margin-top:4px"><div class="prog-fill" id="prog-${id}" style="width:${(progress*100).toFixed(1)}%"></div></div>`
           : `<div class="loc-desc">${l.desc}</div>`}
         <div class="loc-cost">
@@ -1733,9 +1720,10 @@ function buildLocCards(){
       const elProg  = document.getElementById('prog-'+id);
       const inc = locIncome[id];
       if (!inc || !elTimer) continue;
-      const mLeft = Math.max(0, inc.endDist - Game.totalDist);
-      const prog  = Math.min(1, (Game.totalDist - inc.startDist) / METERS_36);
-      elTimer.textContent = '🏃 осталось ' + fmtMetersLeft(mLeft);
+      const now = Date.now();
+      const tLeft = Math.max(0, inc.endTime - now);
+      const prog  = Math.min(1, (now - inc.startTime) / (SECONDS_36*1000));
+      elTimer.textContent = '⏳ осталось ' + fmtTimeLeft(tLeft);
       if (elProg) elProg.style.width = (prog*100).toFixed(1)+'%';
     }
   }, 1000);
@@ -1744,23 +1732,35 @@ function buildLocCards(){
 function selectLocation(id){
   const loc = LOCATIONS[id];
   if (!loc) return;
+  // Доначисляем доход по старой локации перед сменой ставки
+  accrueIncome();
+
   if (!Game.unlocked.has(id)){
     if (Game.coins < loc.price){ showToast('Не хватает монет 💰'); return; }
     Game.coins -= loc.price;
     Game.unlocked.add(id);
     initLocIncome(id);
     const inc = locIncome[id];
-    showToast(`${loc.icon} ${loc.name} открыта! ${inc.totalTon.toFixed(2)} TON за 5.97 млн м`);
+    showToast(`${loc.icon} ${loc.name} открыта! ${inc.totalTon.toFixed(2)} TON за весь срок`);
+    Game.currentLoc = id;
     updateUI();
     buildLocCards();
     saveLocal();
     if (getInitData())
-      apiRequest('POST', '/api/buy/location', { locationId: id }).catch(console.warn);
+      apiRequest('POST', '/api/buy/location', { locationId: id }).then(r => {
+        if (r && r.ok && r.user){
+          Game.coins = r.user.coins;
+          if (r.user.locIncome && r.user.locIncome[id]) locIncome[id] = { ...r.user.locIncome[id] };
+          updateUI(); buildLocCards(); updateCollector();
+        }
+      }).catch(console.warn);
+    return;
   }
   Game.currentLoc = id;
   if (id === 'volcano') initEmbers();
   updateLocCards();
-  // Сохраняем текущую локацию
+  updateCollector();
+  saveLocal();
   if (getInitData())
     apiRequest('POST', '/api/save', buildSavePayload()).catch(console.warn);
 }
@@ -1944,56 +1944,36 @@ async function syncFromServer(){
     const data = await apiRequest('GET', '/api/user');
     if (!data.ok) return;
     const u = data.user;
+    // Сервер — авторитет: он уже доначислил доход по lastTick.
     Game.coins          = u.coins;
     Game.totalCollected = u.totalCollected;
     Game.totalDist      = u.totalDist;
-    Game.sessionDist    = u.sessionDist || 0;  // ← ДОБАВИТЬ
-    Game.sessionLimit   = u.sessionLimit >= 999999999 ? Infinity : u.sessionLimit;
-    Game.sessionRuns    = u.sessionRuns;
-    Game.unlocked       = new Set(u.unlockedLocations);
-    Game.currentLoc     = u.currentLoc;
+    Game.pendingCoins   = u.collectorPending || 0;
+    Game.capSeconds     = u.capSeconds || CAP_BASE_SEC;
+    Game.lastTick       = u.lastTick ? new Date(u.lastTick).getTime() : Date.now();
+    Game.unlocked       = new Set(u.unlockedLocations || ['city']);
+    Game.currentLoc     = u.currentLoc || 'city';
     Game.activeSkin     = u.activeSkin;
-    Game.skinBonus      = u.skinBonus;
+    Game.skinBonus      = u.skinBonus || 0;
     Game.tonWallet      = u.tonWallet || null;
 
-    // Восстанавливаем прогресс локаций с сервера (сколько метров осталось и т.д.)
+    // Прогресс локаций (сроки по времени) с сервера
+    for (const k of Object.keys(locIncome)) delete locIncome[k];
     if (u.locIncome && Object.keys(u.locIncome).length > 0){
       for (const [id, inc] of Object.entries(u.locIncome)){
         locIncome[id] = { ...inc };
       }
     }
-
-    // Коллектор: берём максимум из локального и серверного
-    if (typeof u.collectorPending === 'number'){
-      Game.pendingCoins = Math.max(Game.pendingCoins, u.collectorPending);
-    }
+    if (!locIncome.city) initLocIncome('city');
 
     if (u.activeSkin) loadSprite(u.activeSkin);
     updateUI(); buildLocCards(); updateCollector();
 
-    // Показываем оффлайн доход если есть
-    if (u.offlinePending > 0) showOfflineModal(u.offlinePending);
-
-    // Загружаем кассу
+    // Касса
     const cb = await apiRequest('GET', '/api/cashbox');
     if (cb.ok) { cashboxAmount = cb.cashbox; updateCashbox(); }
   } catch(e){ console.warn('syncFromServer failed:', e); }
 }
-
-function showOfflineModal(amount){
-  showToast(`💰 Пока тебя не было, накопилось ${amount.toFixed(6)} TON!`);
-  // Оффлайн доход идёт в коллектор, не в верхний баланс
-  apiRequest('POST', '/api/offline/collect').then(r => {
-    if (r.ok && r.earned > 0){
-      Game.pendingCoins += r.earned;
-      updateCollector();
-      saveLocal();
-    }
-  }).catch(console.warn);
-}
-
-// Ping больше не нужен: lastOnline обновляется при каждом /api/save (раз в 30 сек),
-// а точный оффлайн-доход клиент считает сам по метке savedAt.
 
 function refreshWallet(){
   const el = $('w-balance');
@@ -2054,7 +2034,6 @@ function start(){
   buildLocCards();
   updateUI();
   setTab('game');
-  if (typeof Game.sessionRuns === 'undefined') Game.sessionRuns = 0;
   loop();
 }
 
@@ -2069,22 +2048,22 @@ window.addEventListener('load', async () => {
     if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
   }
 
-  // 1. Грузим локальный стейт (включает locIncome и offlineIncome)
-  const hadLocalSave = loadLocal();
+  // 1. Грузим локальный стейт. loadLocal сам доначисляет доход за оффлайн
+  //    по lastTick (мгновенный отклик, пока ждём сервер).
+  loadLocal();
 
   // 2. Стартуем игру с восстановленными данными
   start();
   updateCollector();
   updateUI();
 
-  // 3. Синхронизируем с сервером в фоне (не блокирует игру)
+  // 3. Синхронизируем с сервером — он авторитетно пересчитывает доход
+  //    по своему lastTick и возвращает истинные значения.
   if (getInitData()){
     (async () => {
       try {
         const ref = window.Telegram?.WebApp?.initDataUnsafe?.start_param || null;
-        // hadLocalSave=true → клиент уже начислил оффлайн по savedAt,
-        // сервер НЕ должен начислять повторно (избегаем двойного дохода)
-        await apiRequest('POST', '/api/auth', { ref, hadLocalSave });
+        await apiRequest('POST', '/api/auth', { ref });
         await syncFromServer();
       } catch(e){ console.warn('Backend offline, running locally:', e); }
     })();
