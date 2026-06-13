@@ -1755,7 +1755,7 @@ function showToast(msg){
 ═══════════════════════════════════════ */
 
 /* ── API — связь с сервером ── */
-const API_URL = 'https://your-app.railway.app'; // ← замени на свой Railway URL
+const API_URL = 'https://runton-production.up.railway.app'; // ← замени на свой Railway URL
 
 function getInitData(){
   return window.Telegram?.WebApp?.initData || '';
