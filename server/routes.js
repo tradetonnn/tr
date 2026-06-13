@@ -90,7 +90,6 @@ router.post('/offline/collect', async (req, res) => {
     const amount = user.offlinePending || 0;
     if (amount <= 0) return res.json({ ok: true, earned: 0, collectorPending: user.collectorPending || 0 });
 
-    // Кладём оффлайн доход в коллектор, а не сразу в баланс
     user.collectorPending = (user.collectorPending || 0) + amount;
     user.offlinePending   = 0;
     await user.save();
@@ -123,19 +122,32 @@ router.post('/save', async (req, res) => {
   try {
     const { coins, totalCollected, totalDist, sessionDist,
             sessionLimit, sessionRuns, unlockedLocations, currentLoc,
-            activeSkin, skinBonus, collectorPending } = req.body;
+            activeSkin, skinBonus, collectorPending, locIncome } = req.body;
 
-    await User.updateOne(
-      { telegramId: req.telegramUser.id },
-      { $set: {
-          coins, totalCollected, totalDist, sessionDist,
-          sessionLimit, sessionRuns,
-          unlockedLocations, currentLoc,
-          activeSkin, skinBonus,
-          ...(typeof collectorPending === 'number' ? { collectorPending } : {}),
-          updatedAt: Date.now(),
-      }}
-    );
+    const user = await User.findOne({ telegramId: req.telegramUser.id });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+
+    if (typeof coins === 'number')           user.coins          = coins;
+    if (typeof totalCollected === 'number')  user.totalCollected = totalCollected;
+    if (typeof totalDist === 'number')        user.totalDist      = totalDist;
+    if (typeof sessionDist === 'number')      user.sessionDist    = sessionDist;
+    if (typeof sessionLimit === 'number')     user.sessionLimit   = sessionLimit;
+    if (typeof sessionRuns === 'number')      user.sessionRuns    = sessionRuns;
+    if (Array.isArray(unlockedLocations))     user.unlockedLocations = unlockedLocations;
+    if (typeof currentLoc === 'string')       user.currentLoc     = currentLoc;
+    if (activeSkin !== undefined)             user.activeSkin     = activeSkin;
+    if (typeof skinBonus === 'number')        user.skinBonus      = skinBonus;
+    if (typeof collectorPending === 'number') user.collectorPending = collectorPending;
+
+    // locIncome — Mixed-поле, требует markModified
+    if (locIncome && typeof locIncome === 'object') {
+      user.locIncome = locIncome;
+      user.markModified('locIncome');
+    }
+
+    user.updatedAt = Date.now();
+    await user.save();
+
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -144,7 +156,7 @@ router.post('/save', async (req, res) => {
 
 /* ─────────────────────────────────────
    POST /api/collect
-   Собрать монеты из коллектора в верхний баланс
+   Собрать монеты
 ───────────────────────────────────── */
 router.post('/collect', async (req, res) => {
   try {
@@ -155,14 +167,13 @@ router.post('/collect', async (req, res) => {
     const user = await User.findOne({ telegramId: req.telegramUser.id });
     if (!user) return res.status(404).json({ error: 'Not found' });
 
-    // Берём максимум из переданной суммы и того что накопилось на сервере
-    // (клиент передаёт своё значение — берём его как авторитетное)
+    // Обновляем все поля
     user.coins          += amount;
     user.totalCollected += amount;
     user.totalDist      += sessionDist || 0;
     user.sessionDist     = 0;
     user.sessionRuns    += 1;
-    user.collectorPending = 0;  // сбрасываем коллектор на сервере
+    user.collectorPending = 0;
     user.updatedAt       = Date.now();
     
     await user.save();
@@ -385,6 +396,7 @@ function formatUser(user) {
     totalWithdrawn:    user.totalWithdrawn,
     offlinePending:    user.offlinePending || 0,
     collectorPending:  user.collectorPending || 0,
+    locIncome:         user.locIncome || {},
     withdrawals:       user.withdrawals.slice(-10),
   };
 }
