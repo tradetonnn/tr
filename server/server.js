@@ -33,7 +33,7 @@ app.use(cors({
 app.use(express.json());
 
 // ── Роуты ──────────────────────────────
-app.use('/api', require('./user'));
+app.use('/api', require('./routes'));
 
 // ── Health check ────────────────────────
 app.get('/health', (req, res) => {
