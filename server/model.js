@@ -1,5 +1,11 @@
-// models/User.js
 const mongoose = require('mongoose');
+
+const WithdrawSchema = new mongoose.Schema({
+  amount:    { type: Number, required: true },
+  wallet:    { type: String, required: true },
+  status:    { type: String, enum: ['pending','done','rejected'], default: 'pending' },
+  createdAt: { type: Date, default: Date.now },
+}, { _id: true });
 
 const UserSchema = new mongoose.Schema({
   telegramId:  { type: Number, required: true, unique: true },
@@ -8,23 +14,31 @@ const UserSchema = new mongoose.Schema({
   lastName:    { type: String, default: '' },
 
   // Игровые данные
-  coins:         { type: Number, default: 0 },
-  totalCollected:{ type: Number, default: 0 },
-  totalDist:     { type: Number, default: 0 },
-  sessionLimit:  { type: Number, default: 27648 },
-  sessionRuns:   { type: Number, default: 0 },
+  coins:              { type: Number, default: 0 },
+  totalCollected:     { type: Number, default: 0 },
+  totalDist:          { type: Number, default: 0 },
+  sessionLimit:       { type: Number, default: 27648 },
+  sessionRuns:        { type: Number, default: 0 },
+  unlockedLocations:  { type: [String], default: ['city'] },
+  currentLoc:         { type: String, default: 'city' },
+  activeSkin:         { type: String, default: null },
+  skinBonus:          { type: Number, default: 0 },
 
-  // Локации: массив разблокированных id
-  unlockedLocations: { type: [String], default: ['city'] },
-  currentLoc:        { type: String,   default: 'city' },
-
-  // Скин
-  activeSkin:  { type: String,  default: null },
-  skinBonus:   { type: Number,  default: 0 }, // timestamp окончания бонуса
+  // TON кошелёк
+  tonWallet:          { type: String, default: null },
 
   // Реферальная система
-  referredBy:    { type: Number, default: null }, // telegramId пригласившего
-  referralCount: { type: Number, default: 0 },
+  referredBy:         { type: Number, default: null },
+  referralCount:      { type: Number, default: 0 },
+  referralEarned:     { type: Number, default: 0 },
+
+  // История выводов
+  withdrawals:        { type: [WithdrawSchema], default: [] },
+  totalWithdrawn:     { type: Number, default: 0 },
+
+  // Оффлайн доход
+  lastOnline:         { type: Date, default: Date.now },
+  offlinePending:     { type: Number, default: 0 }, // накоплено оффлайн, ждёт сбора
 
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },

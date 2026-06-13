@@ -1,107 +1,196 @@
-// routes/user.js
 const express = require('express');
 const router  = express.Router();
 const User    = require('./model');
 const { authMiddleware } = require('./auth');
+const { calcOfflineIncome } = require('./income');
 
-// Все роуты требуют авторизации
 router.use(authMiddleware);
 
-/* ──────────────────────────────────────
+/* ─────────────────────────────────────
    POST /api/auth
-   Создаёт или обновляет юзера, возвращает его данные.
-────────────────────────────────────── */
+   Создать/обновить юзера + считаем оффлайн доход
+───────────────────────────────────── */
 router.post('/auth', async (req, res) => {
   try {
-    const tg = req.telegramUser;
-    const { ref } = req.body; // реферальный id если есть
+    const tg  = req.telegramUser;
+    const ref = req.body.ref ? Number(req.body.ref) : null;
 
-    const user = await User.findOneAndUpdate(
-      { telegramId: tg.id },
-      {
-        $setOnInsert: {
-          telegramId: tg.id,
-          username:   tg.username  || '',
-          firstName:  tg.first_name || '',
-          lastName:   tg.last_name  || '',
-          referredBy: ref ? Number(ref) : null,
-        },
-        $set: {
-          username:  tg.username   || '',
-          firstName: tg.first_name || '',
-          lastName:  tg.last_name  || '',
-          updatedAt: Date.now(),
-        },
-      },
-      { upsert: true, new: true }
+    let isNew = false;
+    let user  = await User.findOne({ telegramId: tg.id });
+
+    if (!user) {
+      isNew = true;
+      user  = new User({
+        telegramId: tg.id,
+        username:   tg.username   || '',
+        firstName:  tg.first_name || '',
+        lastName:   tg.last_name  || '',
+        referredBy: ref,
+        lastOnline: new Date(),
+      });
+      await user.save();
+      if (ref)
+        await User.updateOne({ telegramId: ref }, { $inc: { referralCount: 1 } });
+    } else {
+      // Считаем оффлайн доход
+      const now        = Date.now();
+      const lastOnline = new Date(user.lastOnline).getTime();
+      const offlineSecs = Math.max(0, (now - lastOnline) / 1000);
+
+      if (offlineSecs > 60) { // минимум минута оффлайна
+        const earned = calcOfflineIncome(
+          user.unlockedLocations,
+          offlineSecs,
+          user.sessionLimit
+        );
+        if (earned > 0) {
+          user.offlinePending = (user.offlinePending || 0) + earned;
+        }
+      }
+
+      user.username  = tg.username   || '';
+      user.firstName = tg.first_name || '';
+      user.lastName  = tg.last_name  || '';
+      user.lastOnline = new Date();
+      await user.save();
+    }
+
+    res.json({ ok: true, isNew, user: formatUser(user) });
+  } catch (err) {
+    console.error('auth:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ─────────────────────────────────────
+   POST /api/ping
+   Обновляем lastOnline пока юзер в игре (раз в 30 сек)
+───────────────────────────────────── */
+router.post('/ping', async (req, res) => {
+  try {
+    await User.updateOne(
+      { telegramId: req.telegramUser.id },
+      { $set: { lastOnline: new Date() } }
     );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
-    // Если новый юзер и есть реферер — увеличиваем счётчик рефереру
-    if (user.referredBy && req.body.isNew) {
+/* ─────────────────────────────────────
+   POST /api/offline/collect
+   Забрать оффлайн накопленные монеты
+───────────────────────────────────── */
+router.post('/offline/collect', async (req, res) => {
+  try {
+    const user = await User.findOne({ telegramId: req.telegramUser.id });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+
+    const amount = user.offlinePending || 0;
+    if (amount <= 0) return res.json({ ok: true, earned: 0, coins: user.coins });
+
+    user.coins          += amount;
+    user.totalCollected += amount;
+    user.offlinePending  = 0;
+    await user.save();
+
+    // +5% рефереру
+    if (user.referredBy && amount > 0) {
+      const bonus = amount * 0.05;
       await User.updateOne(
         { telegramId: user.referredBy },
-        { $inc: { referralCount: 1 } }
+        { $inc: { coins: bonus, referralEarned: bonus } }
       );
     }
 
-    res.json({ ok: true, user: formatUser(user) });
+    res.json({ ok: true, earned: amount, coins: user.coins });
   } catch (err) {
-    console.error('auth error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-/* ──────────────────────────────────────
+/* ─────────────────────────────────────
    GET /api/user
-   Получить данные текущего юзера.
-────────────────────────────────────── */
+   Загрузить прогресс игрока
+───────────────────────────────────── */
 router.get('/user', async (req, res) => {
   try {
     const user = await User.findOne({ telegramId: req.telegramUser.id });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ error: 'Not found' });
     res.json({ ok: true, user: formatUser(user) });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-/* ──────────────────────────────────────
+/* ─────────────────────────────────────
+   POST /api/save
+   Сохранить весь прогресс одним запросом
+───────────────────────────────────── */
+router.post('/save', async (req, res) => {
+  try {
+    const { coins, totalCollected, totalDist, sessionLimit,
+            sessionRuns, unlockedLocations, currentLoc,
+            activeSkin, skinBonus } = req.body;
+
+    await User.updateOne(
+      { telegramId: req.telegramUser.id },
+      { $set: {
+          coins, totalCollected, totalDist,
+          sessionLimit, sessionRuns,
+          unlockedLocations, currentLoc,
+          activeSkin, skinBonus,
+          updatedAt: Date.now(),
+      }}
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ─────────────────────────────────────
    POST /api/collect
-   Игрок нажал "Собрать" — сохраняем монеты.
-   Body: { amount: number, sessionDist: number }
-────────────────────────────────────── */
+   Собрать монеты
+───────────────────────────────────── */
 router.post('/collect', async (req, res) => {
   try {
     const { amount, sessionDist } = req.body;
-    if (typeof amount !== 'number' || amount < 0) {
+    if (typeof amount !== 'number' || amount < 0)
       return res.status(400).json({ error: 'Invalid amount' });
-    }
 
     const user = await User.findOneAndUpdate(
       { telegramId: req.telegramUser.id },
-      {
-        $inc: {
+      { $inc: {
           coins:          amount,
           totalCollected: amount,
           totalDist:      sessionDist || 0,
           sessionRuns:    1,
         },
-        $set: { updatedAt: Date.now() },
+        $set: { updatedAt: Date.now() }
       },
       { new: true }
     );
 
-    res.json({ ok: true, coins: user.coins, totalCollected: user.totalCollected });
+    // +5% рефереру
+    if (user.referredBy) {
+      const bonus = amount * 0.05;
+      await User.updateOne(
+        { telegramId: user.referredBy },
+        { $inc: { coins: bonus, referralEarned: bonus } }
+      );
+    }
+
+    res.json({ ok: true, coins: user.coins });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-/* ──────────────────────────────────────
+/* ─────────────────────────────────────
    POST /api/buy/location
-   Покупка локации.
-   Body: { locationId: string }
-────────────────────────────────────── */
+───────────────────────────────────── */
 router.post('/buy/location', async (req, res) => {
   try {
     const PRICES = { forest:5, ocean:10, mountains:50, volcano:100, space:300 };
@@ -110,7 +199,7 @@ router.post('/buy/location', async (req, res) => {
     if (!price) return res.status(400).json({ error: 'Invalid location' });
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ error: 'Not found' });
     if (user.unlockedLocations.includes(locationId))
       return res.status(400).json({ error: 'Already unlocked' });
     if (user.coins < price)
@@ -118,7 +207,6 @@ router.post('/buy/location', async (req, res) => {
 
     user.coins -= price;
     user.unlockedLocations.push(locationId);
-    user.updatedAt = Date.now();
     await user.save();
 
     res.json({ ok: true, coins: user.coins, unlockedLocations: user.unlockedLocations });
@@ -127,31 +215,27 @@ router.post('/buy/location', async (req, res) => {
   }
 });
 
-/* ──────────────────────────────────────
+/* ─────────────────────────────────────
    POST /api/buy/skin
-   Покупка скина.
-   Body: { skinId: string }
-────────────────────────────────────── */
+───────────────────────────────────── */
 router.post('/buy/skin', async (req, res) => {
   try {
-    const SKIN_PRICES    = { runner:10, cyber:25, ninja:50, astro:90 };
-    const SKIN_MONTHS    = { runner:1,  cyber:3,  ninja:6,  astro:12 };
+    const SKINS = { runner:{price:10,months:1}, cyber:{price:25,months:3},
+                    ninja:{price:50,months:6},  astro:{price:90,months:12} };
     const { skinId } = req.body;
-    const price  = SKIN_PRICES[skinId];
-    const months = SKIN_MONTHS[skinId];
-    if (!price) return res.status(400).json({ error: 'Invalid skin' });
+    const skin = SKINS[skinId];
+    if (!skin) return res.status(400).json({ error: 'Invalid skin' });
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.coins < price) return res.status(400).json({ error: 'Not enough coins' });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+    if (user.coins < skin.price)
+      return res.status(400).json({ error: 'Not enough coins' });
 
-    const ms   = months * 30 * 24 * 3600 * 1000;
+    const ms   = skin.months * 30 * 24 * 3600 * 1000;
     const base = user.skinBonus > Date.now() ? user.skinBonus : Date.now();
-
-    user.coins     -= price;
+    user.coins     -= skin.price;
     user.activeSkin = skinId;
     user.skinBonus  = base + ms;
-    user.updatedAt  = Date.now();
     await user.save();
 
     res.json({ ok: true, coins: user.coins, activeSkin: user.activeSkin, skinBonus: user.skinBonus });
@@ -160,32 +244,27 @@ router.post('/buy/skin', async (req, res) => {
   }
 });
 
-/* ──────────────────────────────────────
+/* ─────────────────────────────────────
    POST /api/buy/limit
-   Покупка увеличения лимита.
-   Body: { upgradeIndex: number }
-────────────────────────────────────── */
+───────────────────────────────────── */
 router.post('/buy/limit', async (req, res) => {
   try {
     const UPGRADES = [
-      { add: 6912,    price: 1,  unlimited: false },
-      { add: 34560,   price: 5,  unlimited: false },
-      { add: 69120,   price: 10, unlimited: false },
-      { add: Infinity, price: 30, unlimited: true  },
+      { add:6912,    price:1  },
+      { add:34560,   price:5  },
+      { add:69120,   price:10 },
+      { add:999999999, price:30, unlimited:true },
     ];
-    const { upgradeIndex } = req.body;
-    const upg = UPGRADES[upgradeIndex];
+    const upg = UPGRADES[req.body.upgradeIndex];
     if (!upg) return res.status(400).json({ error: 'Invalid upgrade' });
 
     const user = await User.findOne({ telegramId: req.telegramUser.id });
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.coins < upg.price) return res.status(400).json({ error: 'Not enough coins' });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+    if (user.coins < upg.price)
+      return res.status(400).json({ error: 'Not enough coins' });
 
     user.coins -= upg.price;
-    user.sessionLimit = upg.unlimited
-      ? 999999999
-      : user.sessionLimit + upg.add;
-    user.updatedAt = Date.now();
+    user.sessionLimit = upg.unlimited ? 999999999 : user.sessionLimit + upg.add;
     await user.save();
 
     res.json({ ok: true, coins: user.coins, sessionLimit: user.sessionLimit });
@@ -194,7 +273,104 @@ router.post('/buy/limit', async (req, res) => {
   }
 });
 
-// ── Хелпер: форматирование юзера для фронта ──
+/* ─────────────────────────────────────
+   POST /api/wallet/connect
+   Подключить TON кошелёк
+───────────────────────────────────── */
+router.post('/wallet/connect', async (req, res) => {
+  try {
+    const { tonAddress } = req.body;
+    if (!tonAddress || typeof tonAddress !== 'string')
+      return res.status(400).json({ error: 'Invalid address' });
+
+    await User.updateOne(
+      { telegramId: req.telegramUser.id },
+      { $set: { tonWallet: tonAddress, updatedAt: Date.now() } }
+    );
+    res.json({ ok: true, tonWallet: tonAddress });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ─────────────────────────────────────
+   POST /api/wallet/withdraw
+   Запрос на вывод
+───────────────────────────────────── */
+router.post('/wallet/withdraw', async (req, res) => {
+  try {
+    const { amount } = req.body;
+    if (typeof amount !== 'number' || amount < 1)
+      return res.status(400).json({ error: 'Min withdrawal: 1 TON' });
+
+    const user = await User.findOne({ telegramId: req.telegramUser.id });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+    if (!user.tonWallet)
+      return res.status(400).json({ error: 'No wallet connected' });
+    if (user.coins < amount)
+      return res.status(400).json({ error: 'Not enough coins' });
+
+    user.coins         -= amount;
+    user.totalWithdrawn += amount;
+    user.withdrawals.push({ amount, wallet: user.tonWallet });
+    await user.save();
+
+    res.json({ ok: true, coins: user.coins, status: 'pending' });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ─────────────────────────────────────
+   GET /api/cashbox
+   Текущий остаток кассы (общий для всех)
+───────────────────────────────────── */
+router.get('/cashbox', async (req, res) => {
+  try {
+    // Сумма всех pending выводов вычитается из 500
+    const pending = await User.aggregate([
+      { $unwind: '$withdrawals' },
+      { $match:  { 'withdrawals.status': 'pending' } },
+      { $group:  { _id: null, total: { $sum: '$withdrawals.amount' } } },
+    ]);
+    const spent = pending[0]?.total || 0;
+    const cashbox = Math.max(0, 500 - spent);
+    res.json({ ok: true, cashbox });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ─────────────────────────────────────
+   GET /api/friends
+   Список рефералов и заработок
+───────────────────────────────────── */
+router.get('/friends', async (req, res) => {
+  try {
+    const user = await User.findOne({ telegramId: req.telegramUser.id });
+    if (!user) return res.status(404).json({ error: 'Not found' });
+
+    const friends = await User.find(
+      { referredBy: req.telegramUser.id },
+      { firstName:1, username:1, totalCollected:1, createdAt:1 }
+    ).limit(50);
+
+    res.json({
+      ok: true,
+      referralCount:  user.referralCount,
+      referralEarned: user.referralEarned,
+      friends: friends.map(f => ({
+        name:     f.firstName || f.username || 'Игрок',
+        earned:   (f.totalCollected * 0.05).toFixed(6),
+        joinedAt: f.createdAt,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Формат юзера для фронта ──────────
 function formatUser(user) {
   return {
     telegramId:        user.telegramId,
@@ -209,7 +385,12 @@ function formatUser(user) {
     currentLoc:        user.currentLoc,
     activeSkin:        user.activeSkin,
     skinBonus:         user.skinBonus,
+    tonWallet:         user.tonWallet,
     referralCount:     user.referralCount,
+    referralEarned:    user.referralEarned,
+    totalWithdrawn:    user.totalWithdrawn,
+    offlinePending:    user.offlinePending || 0,
+    withdrawals:       user.withdrawals.slice(-10),
   };
 }
 
